@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:ffi';
 
 import 'package:ffi/ffi.dart';
 import 'package:gpio/src/chip.dart';
+import 'package:gpio/src/event_isolate.dart';
+import 'package:gpio/src/events.dart';
 import 'package:gpio/src/exception.dart';
 import 'package:gpio/src/ffi/gpio_uapi.dart';
 import 'package:gpio/src/ffi/ioctl.dart';
@@ -50,6 +53,79 @@ class LineRequest {
 
   /// Whether any held line asks for edge events.
   bool get hasEdgeEvents => _lines.any((l) => l.wantsEvents);
+
+  StreamController<LineEvent>? _events;
+  GpioEventReader? _reader;
+
+  /// Edge transitions on the held lines, as the kernel reports them.
+  ///
+  /// Timestamps come from the kernel, stamped in the interrupt handler, so
+  /// delivery jitter never corrupts them — only when you hear about an event,
+  /// not what time it says.
+  ///
+  /// A [LineEventsDropped] is emitted when the kernel's per-request FIFO
+  /// overflowed and edges were lost. It arrives *before* the event that
+  /// followed the gap, so a listener learns it missed something before seeing
+  /// what came next.
+  ///
+  /// The stream is single-subscription: it owns an isolate, and handing the
+  /// same one to two listeners would mean each seeing half the events. Cancel
+  /// the subscription, or [close] the request, to stop it.
+  Stream<LineEvent> get events {
+    _checkOpen();
+    if (!hasEdgeEvents) {
+      throw StateError(
+        'No line in this request asked for edge detection. Pass an `edge:` '
+        'other than Edge.none to LineConfig.input, or reconfigure().',
+      );
+    }
+    if (_events == null) _startEvents();
+    return _events!.stream;
+  }
+
+  void _startEvents() {
+    final decoder = EventDecoder(offsets);
+    late final StreamController<LineEvent> controller;
+    StreamSubscription<RawLineEvent>? subscription;
+
+    controller = StreamController<LineEvent>(
+      onListen: () async {
+        try {
+          final reader = await _syscalls.openEvents(_fd);
+          _reader = reader;
+          // The request may have been closed while the isolate was starting.
+          if (_closed) {
+            await reader.close();
+            await controller.close();
+            return;
+          }
+          subscription = reader.events.listen(
+            (raw) => decoder
+                .decode(
+                  offset: raw.offset,
+                  id: raw.id,
+                  timestampNanos: raw.timestampNanos,
+                  seqno: raw.seqno,
+                  lineSeqno: raw.lineSeqno,
+                )
+                .forEach(controller.add),
+            onDone: controller.close,
+            onError: controller.addError,
+          );
+        } on Object catch (error, stack) {
+          controller.addError(error, stack);
+          unawaited(controller.close());
+        }
+      },
+      onCancel: () async {
+        await subscription?.cancel();
+        await _reader?.close();
+        _reader = null;
+        _events = null;
+      },
+    );
+    _events = controller;
+  }
 
   /// Reads every held line in one ioctl.
   ///
@@ -179,9 +255,16 @@ class LineRequest {
   }
 
   /// Releases the lines. Idempotent.
-  void close() {
+  ///
+  /// Stops the event isolate first, so nothing is left blocked on a descriptor
+  /// that is about to be closed underneath it.
+  Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    await _reader?.close();
+    _reader = null;
+    await _events?.close();
+    _events = null;
     _syscalls.close(_fd);
   }
 

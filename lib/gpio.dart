@@ -25,6 +25,7 @@
 library;
 
 export 'src/chip.dart' show GpioChip;
+export 'src/events.dart' show LineEdgeEvent, LineEvent, LineEventsDropped;
 export 'src/exception.dart';
 export 'src/line_config.dart' show LineConfig;
 export 'src/line_request.dart';

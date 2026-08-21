@@ -42,6 +42,31 @@ class Libc {
           ffi.IntPtr Function(ffi.Int, ffi.Pointer<ffi.Void>, ffi.IntPtr),
           int Function(int, ffi.Pointer<ffi.Void>, int)>('read');
 
+  /// `poll(2)`. Returns the number of ready descriptors, `0` on timeout, or
+  /// `-1` with [errno] set.
+  ///
+  /// Used in preference to `epoll` deliberately: `struct epoll_event` is
+  /// `__attribute__((packed))` **only** on x86-64 (12 bytes there, 16 on arm64
+  /// and armv7), and Dart's `@Packed` annotation cannot be applied per
+  /// architecture. `struct pollfd` is 8 bytes with identical offsets on every
+  /// Linux ABI. With two descriptors to watch, `epoll`'s scaling advantage buys
+  /// nothing, and the portable struct is worth a great deal.
+  late final int Function(ffi.Pointer<PollFd>, int, int) poll =
+      _lib.lookupFunction<
+          ffi.Int Function(ffi.Pointer<PollFd>, ffi.UnsignedLong, ffi.Int),
+          int Function(ffi.Pointer<PollFd>, int, int)>('poll');
+
+  /// `eventfd(2)`. A descriptor whose only job is to break a blocking [poll].
+  late final int Function(int, int) eventfd = _lib.lookupFunction<
+      ffi.Int Function(ffi.UnsignedInt, ffi.Int),
+      int Function(int, int)>('eventfd');
+
+  /// `write(2)`.
+  late final int Function(int, ffi.Pointer<ffi.Void>, int) write =
+      _lib.lookupFunction<
+          ffi.IntPtr Function(ffi.Int, ffi.Pointer<ffi.Void>, ffi.IntPtr),
+          int Function(int, ffi.Pointer<ffi.Void>, int)>('write');
+
   late final ffi.Pointer<ffi.Int> Function() _errnoLocation = _lookupErrno();
 
   /// glibc and musl export `__errno_location`; Android's bionic exports
@@ -68,6 +93,40 @@ class Libc {
   /// this immediately after a failed call sees that call's value — there is no
   /// thread hop in between.
   int get errno => _errnoLocation().value;
+}
+
+/// `struct pollfd`.
+///
+/// 8 bytes on every Linux ABI, unlike `struct epoll_event`.
+final class PollFd extends ffi.Struct {
+  /// The descriptor to watch.
+  @ffi.Int()
+  external int fd;
+
+  /// Requested events.
+  @ffi.Short()
+  external int events;
+
+  /// Events that occurred.
+  @ffi.Short()
+  external int revents;
+}
+
+/// `poll(2)` event bits.
+class PollEvents {
+  const PollEvents._();
+
+  /// Data is available to read.
+  static const int pollIn = 0x001;
+
+  /// An error occurred.
+  static const int pollErr = 0x008;
+
+  /// The descriptor hung up — the device went away.
+  static const int pollHup = 0x010;
+
+  /// The descriptor is not open.
+  static const int pollNval = 0x020;
 }
 
 /// The `open(2)` flags this package uses.

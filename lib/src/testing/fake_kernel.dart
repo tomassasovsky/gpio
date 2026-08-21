@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:ffi';
 
 import 'package:gpio/src/chip.dart';
+import 'package:gpio/src/event_isolate.dart';
 import 'package:gpio/src/ffi/gpio_uapi.dart';
 import 'package:gpio/src/ffi/ioctl.dart';
 import 'package:gpio/src/ffi/libc.dart';
@@ -45,11 +47,21 @@ class FakeChip {
   bool level(int offset) => _levels[offset];
 
   /// Drives [offset] from the outside world, as hardware would.
-  void setLevel(int offset, {required bool value}) => _levels[offset] = value;
+  ///
+  /// If a request holds the line with edge detection, this generates an edge
+  /// event exactly as the kernel would — including the sequence numbers.
+  void setLevel(int offset, {required bool value}) {
+    final changed = _levels[offset] != value;
+    _levels[offset] = value;
+    if (changed) onEdge?.call(offset, level: value);
+  }
 
   /// Drives several lines at once.
   void setLevels(Map<int, bool> values) =>
-      values.forEach((k, v) => _levels[k] = v);
+      values.forEach((k, v) => setLevel(k, value: v));
+
+  /// Installed by [FakeKernel] so level changes become edge events.
+  void Function(int offset, {required bool level})? onEdge;
 }
 
 /// A [Syscalls] implementation backed by an in-memory model of the GPIO
@@ -95,6 +107,55 @@ class FakeKernel implements Syscalls {
   /// a v1 ioctl was never attempted.
   final List<int> ioctlLog = [];
 
+  final Map<int, _FakeEvents> _eventReaders = {};
+  int _seqno = 0;
+
+  /// Drops this many upcoming events instead of delivering them, without
+  /// reusing their sequence numbers — exactly what the kernel's per-request
+  /// FIFO does when it overflows.
+  ///
+  /// The point of the v2 ABI's sequence numbers is that this becomes provable
+  /// rather than silent, so it has to be reproducible in a test.
+  int dropNextEvents = 0;
+
+  @override
+  Future<GpioEventReader> openEvents(int fd) async {
+    final request = _requestFds[fd];
+    if (request == null) {
+      throw StateError('no such request descriptor: $fd');
+    }
+    final reader = _FakeEvents(request);
+    _eventReaders[fd] = reader;
+    request.chip.onEdge = _emit;
+    return reader.asReader();
+  }
+
+  void _emit(int offset, {required bool level}) {
+    for (final reader in _eventReaders.values) {
+      final index = reader.request.indexOf(offset);
+      if (index == null) continue;
+      if (!reader.request.wantsEdge(offset, rising: level)) continue;
+
+      _seqno++;
+      if (dropNextEvents > 0) {
+        // Consumed a sequence number but delivered nothing — the gap is what
+        // makes the loss detectable downstream.
+        dropNextEvents--;
+        continue;
+      }
+      final logical = reader.request.isActiveLow(offset) ? !level : level;
+      reader.controller.add(
+        (
+          offset: offset,
+          id: logical ? 1 : 2, // 1 = rising, 2 = falling
+          timestampNanos: _seqno * 1000000,
+          seqno: _seqno,
+          lineSeqno: _seqno,
+        ),
+      );
+    }
+  }
+
   @override
   int get errno => _errno;
 
@@ -115,6 +176,7 @@ class FakeKernel implements Syscalls {
 
   @override
   int close(int fd) {
+    unawaited(_eventReaders.remove(fd)?.controller.close() ?? Future.value());
     final request = _requestFds.remove(fd);
     if (request != null) {
       request.offsets.forEach(request.chip.owners.remove);
@@ -361,4 +423,27 @@ class _FakeRequest {
   bool isOutput(int offset) => flagsFor(offset) & LineFlag.output != 0;
 
   bool isActiveLow(int offset) => flagsFor(offset) & LineFlag.activeLow != 0;
+
+  /// Whether this line asked for the edge a transition to [rising] produces.
+  bool wantsEdge(int offset, {required bool rising}) {
+    final flags = flagsFor(offset);
+    final logicalRising = isActiveLow(offset) ? !rising : rising;
+    return logicalRising
+        ? flags & LineFlag.edgeRising != 0
+        : flags & LineFlag.edgeFalling != 0;
+  }
+}
+
+/// A [GpioEventReader] fed by [FakeKernel] rather than by a real isolate.
+class _FakeEvents {
+  _FakeEvents(this.request);
+
+  final _FakeRequest request;
+  final StreamController<RawLineEvent> controller =
+      StreamController<RawLineEvent>();
+
+  GpioEventReader asReader() => GpioEventReader.forTesting(
+        events: controller.stream,
+        onClose: controller.close,
+      );
 }

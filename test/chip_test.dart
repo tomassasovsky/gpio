@@ -161,11 +161,11 @@ void main() {
       );
     });
 
-    test('closing a request releases its lines', () {
+    test('closing a request releases its lines', () async {
       final chip = GpioChip.byLabel('pinctrl-rp1', syscalls: kernel);
       addTearDown(chip.close);
 
-      chip.request(
+      await chip.request(
         consumer: 'first',
         lines: [const LineConfig.input(3)],
       ).close();

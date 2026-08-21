@@ -190,18 +190,18 @@ void main() {
   });
 
   group('closed requests', () {
-    test('reject further use', () {
-      final request = chip.request(lines: [const LineConfig.output(1)])
-        ..close();
+    test('reject further use', () async {
+      final request = chip.request(lines: [const LineConfig.output(1)]);
+      await request.close();
       expect(request.getValues, throwsStateError);
       expect(() => request.setValue(1, value: true), throwsStateError);
       expect(() => request.fd, throwsStateError);
     });
 
-    test('close is idempotent and leaks nothing', () {
-      chip.request(lines: [const LineConfig.output(1)])
-        ..close()
-        ..close();
+    test('close is idempotent and leaks nothing', () async {
+      final request = chip.request(lines: [const LineConfig.output(1)]);
+      await request.close();
+      await request.close();
       expect(kernel.openDescriptors, 1, reason: 'only the chip remains open');
     });
   });
