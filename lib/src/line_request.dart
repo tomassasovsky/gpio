@@ -113,8 +113,13 @@ class LineRequest {
             onError: controller.addError,
           );
         } on Object catch (error, stack) {
-          controller.addError(error, stack);
-          unawaited(controller.close());
+          // The request may have been closed while openEvents was in flight,
+          // which closes this controller — adding to a closed controller throws
+          // a StateError with nobody to catch it.
+          if (!controller.isClosed) {
+            controller.addError(error, stack);
+            unawaited(controller.close());
+          }
         }
       },
       onCancel: () async {
@@ -263,8 +268,19 @@ class LineRequest {
     _closed = true;
     await _reader?.close();
     _reader = null;
-    await _events?.close();
+    final events = _events;
     _events = null;
+    if (events != null) {
+      // Only await when something is listening: a single-subscription
+      // controller's close() future does not complete until its stream is
+      // listened to and done, so awaiting an unlistened one hangs here forever
+      // and the request descriptor is never released.
+      if (events.hasListener) {
+        await events.close();
+      } else {
+        unawaited(events.close());
+      }
+    }
     _syscalls.close(_fd);
   }
 

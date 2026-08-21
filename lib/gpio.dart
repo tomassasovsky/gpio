@@ -16,7 +16,7 @@
 /// );
 /// print(request.getValue(17));
 /// request.setValue(27, value: true);
-/// request.close();
+/// await request.close();
 /// chip.close();
 /// ```
 ///

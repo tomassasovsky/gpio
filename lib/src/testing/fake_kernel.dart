@@ -108,7 +108,6 @@ class FakeKernel implements Syscalls {
   final List<int> ioctlLog = [];
 
   final Map<int, _FakeEvents> _eventReaders = {};
-  int _seqno = 0;
 
   /// Drops this many upcoming events instead of delivering them, without
   /// reusing their sequence numbers — exactly what the kernel's per-request
@@ -136,7 +135,7 @@ class FakeKernel implements Syscalls {
       if (index == null) continue;
       if (!reader.request.wantsEdge(offset, rising: level)) continue;
 
-      _seqno++;
+      reader.seqno++;
       if (dropNextEvents > 0) {
         // Consumed a sequence number but delivered nothing — the gap is what
         // makes the loss detectable downstream.
@@ -148,9 +147,9 @@ class FakeKernel implements Syscalls {
         (
           offset: offset,
           id: logical ? 1 : 2, // 1 = rising, 2 = falling
-          timestampNanos: _seqno * 1000000,
-          seqno: _seqno,
-          lineSeqno: _seqno,
+          timestampNanos: reader.seqno * 1000000,
+          seqno: reader.seqno,
+          lineSeqno: reader.seqno,
         ),
       );
     }
@@ -439,6 +438,11 @@ class _FakeEvents {
   _FakeEvents(this.request);
 
   final _FakeRequest request;
+
+  /// Per-request, exactly as the kernel counts it. A counter shared across
+  /// requests would fabricate sequence gaps and therefore phantom drops.
+  int seqno = 0;
+
   final StreamController<RawLineEvent> controller =
       StreamController<RawLineEvent>();
 

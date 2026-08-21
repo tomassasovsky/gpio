@@ -134,6 +134,23 @@ macOS is the one genuine "no": no Mac has GPIO pins, and macOS does not run on a
 Pi. Reaching pins from a Mac means a USB bridge (FT232H, MCP2221), which is a
 device driver rather than an OS backend.
 
+## Running the tests
+
+```sh
+dart test                  # 83 tests, no hardware needed
+dart test -t integration   # real ioctls against the kernel's gpio-sim
+```
+
+The default suite runs against an in-memory model of the character device, so
+it passes on any machine.
+
+The `integration` suite is the one that talks to a real `/dev/gpiochipN`, via
+the kernel's own `gpio-sim` module — the same thing libgpiod's test suite uses.
+It needs **root** and a kernel built with `CONFIG_GPIO_SIM`. Note that GitHub's
+hosted runners do *not* have it (their Azure kernel ships no such module), so
+CI reports a warning and skips; a stock Debian, Ubuntu or Raspberry Pi OS
+kernel does have it.
+
 ## Licence
 
 MIT. The bindings are generated from the kernel's own `<linux/gpio.h>`, which

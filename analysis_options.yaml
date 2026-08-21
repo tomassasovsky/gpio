@@ -5,7 +5,3 @@ analyzer:
     # Generated from <linux/gpio.h> by `dart run ffigen`; not hand-edited.
     - lib/src/ffi/gpio_uapi.dart
 
-linter:
-  rules:
-    # Runnable examples print to the console -- that IS their output.
-    avoid_print: false

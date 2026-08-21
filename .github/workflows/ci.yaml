@@ -47,6 +47,14 @@ jobs:
   # else runs against FakeKernel, which is a model of the kernel written by the
   # same hand as the code it checks -- this is the job that would catch a shared
   # misunderstanding.
+  #
+  # KNOWN: GitHub's hosted runners cannot run it. Their Azure kernel ships no
+  # gpio-sim module ("modprobe: FATAL: Module gpio-sim not found in directory
+  # /lib/modules/6.17.0-1022-azure"), so this job currently always takes the
+  # warn-and-skip path. It is kept green-but-loud on purpose: the suite runs
+  # unchanged on any machine whose kernel has CONFIG_GPIO_SIM, including a
+  # Raspberry Pi, and that is where it earns its keep. Getting it running in CI
+  # would mean booting a QEMU VM with a stock distro kernel.
   integration:
     runs-on: ubuntu-latest
     steps:

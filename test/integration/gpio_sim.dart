@@ -10,7 +10,7 @@ import 'dart:io';
 /// Needs root and `CONFIG_GPIO_SIM`. [isAvailable] reports whether both hold,
 /// so the suite can skip rather than fail where they do not.
 class GpioSim {
-  GpioSim._(this._deviceDir, this.chipPath, this._bankDir);
+  GpioSim._(this._deviceDir, this.chipPath, this._linesDir);
 
   /// Creates a simulated chip with [lineCount] lines.
   factory GpioSim.create({
@@ -26,9 +26,19 @@ class GpioSim {
     File('$bankDir/label').writeAsStringSync(label);
     File('$deviceDir/live').writeAsStringSync('1');
 
-    // The kernel reports which /dev node it allocated.
+    // Once live, the kernel reports which platform device and /dev node it
+    // allocated.
     final chipName = File('$bankDir/chip_name').readAsStringSync().trim();
-    return GpioSim._(deviceDir, '/dev/$chipName', bankDir);
+    final devName = File('$deviceDir/dev_name').readAsStringSync().trim();
+
+    // The per-line `pull` and `value` knobs are NOT in configfs -- they live in
+    // sysfs under the platform device
+    // (Documentation/admin-guide/gpio/gpio-sim.rst: "Each simulated GPIO chip
+    // creates a separate sysfs group under its device directory for each
+    // exposed line").
+    final linesDir = '/sys/devices/platform/$devName/$chipName';
+
+    return GpioSim._(deviceDir, '/dev/$chipName', linesDir);
   }
 
   static const _configfs = '/sys/kernel/config/gpio-sim';
@@ -37,40 +47,54 @@ class GpioSim {
   static bool get isAvailable {
     if (!Platform.isLinux) return false;
     if (Directory(_configfs).existsSync()) return true;
-    // The module may simply not be loaded yet.
-    Process.runSync('modprobe', ['gpio-sim']);
+    // The module may simply not be loaded yet. Every failure here -- no
+    // modprobe on PATH, not root, no such module -- means "unavailable", never
+    // an exception: this getter exists so the suite can SKIP, and a throw from
+    // it would fail the whole file at load time instead.
+    try {
+      Process.runSync('modprobe', ['gpio-sim']);
+    } on Object {
+      return false;
+    }
     return Directory(_configfs).existsSync();
   }
 
   /// Why [isAvailable] is false, for a useful skip message.
   static String get unavailableReason {
     if (!Platform.isLinux) return 'not Linux';
-    final uid = Process.runSync('id', ['-u']).stdout.toString().trim();
-    if (uid != '0') return 'needs root (configfs is root-only)';
-    return 'gpio-sim not available (CONFIG_GPIO_SIM missing?)';
+    try {
+      final uid = Process.runSync('id', ['-u']).stdout.toString().trim();
+      if (uid != '0') return 'needs root (configfs is root-only)';
+    } on Object {
+      // Can't even ask; fall through to the generic reason.
+    }
+    return 'no gpio-sim: needs a kernel with CONFIG_GPIO_SIM and configfs '
+        'mounted (GitHub-hosted runners have neither)';
   }
 
   final String _deviceDir;
-  final String _bankDir;
+
+  /// Sysfs directory holding the per-line `sim_gpioN/` groups.
+  final String _linesDir;
 
   /// The `/dev/gpiochipN` this simulated chip appears as.
   final String chipPath;
 
   /// Drives a line from the simulated "outside world".
   void setPull(int offset, {required bool high}) {
-    File('$_bankDir/sim_gpio$offset/pull')
+    File('$_linesDir/sim_gpio$offset/pull')
         .writeAsStringSync(high ? 'pull-up' : 'pull-down');
   }
 
   /// Reads what the chip currently presents on [offset].
   bool value(int offset) =>
-      File('$_bankDir/sim_gpio$offset/value').readAsStringSync().trim() == '1';
+      File('$_linesDir/sim_gpio$offset/value').readAsStringSync().trim() == '1';
 
   /// Tears the simulated chip down.
   void destroy() {
     try {
       File('$_deviceDir/live').writeAsStringSync('0');
-      Directory(_bankDir).deleteSync();
+      Directory('$_deviceDir/bank0').deleteSync();
       Directory(_deviceDir).deleteSync();
     } on FileSystemException {
       // Best effort: a failed teardown must not mask a test failure.

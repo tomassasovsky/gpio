@@ -1,5 +1,7 @@
 tags:
-  # Needs root and CONFIG_GPIO_SIM. Excluded from the default run so a
-  # developer's `dart test` stays green on any machine; CI opts in explicitly.
+  # Declared so the runner does not warn about an unknown tag. Deliberately NO
+  # `skip:` here: a tag-level skip applies even under `-t integration`, so the
+  # CI job would report every test skipped and pass green having run nothing.
+  # The suite skips itself at runtime instead, via GpioSim.isAvailable, which
+  # also produces a reason worth reading.
   integration:
-    skip: "run with `dart test -t integration` (needs root + gpio-sim)"

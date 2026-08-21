@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ffi' as ffi;
 import 'dart:isolate';
 
@@ -89,7 +90,13 @@ Future<void> eventIsolateMain(EventIsolateArgs args) async {
 
 /// Owns the event isolate and the eventfd used to stop it.
 class GpioEventReader {
-  GpioEventReader._(this._libc, this._wakeupFd, this._receivePort, this.events);
+  GpioEventReader._(
+    this._libc,
+    this._wakeupFd,
+    this._receivePort,
+    this.events,
+    this._exited,
+  );
 
   /// Builds a reader over an arbitrary stream, for fakes and tests.
   ///
@@ -101,6 +108,7 @@ class GpioEventReader {
   })  : _libc = null,
         _wakeupFd = -1,
         _receivePort = null,
+        _exited = null,
         _onClose = onClose;
 
   /// Starts reading events from [requestFd].
@@ -111,22 +119,38 @@ class GpioEventReader {
       throw StateError('eventfd failed with errno ${c.errno}');
     }
     final port = ReceivePort();
-    await Isolate.spawn(
-      eventIsolateMain,
-      (port: port.sendPort, requestFd: requestFd, wakeupFd: wakeupFd),
-      debugName: 'gpio-events-$requestFd',
-    );
-    return GpioEventReader._(
-      c,
-      wakeupFd,
-      port,
-      port.takeWhile((m) => m != null).cast<RawLineEvent>(),
-    );
+    // The isolate sends `null` as its last act, which both ends the event
+    // stream and tells close() that nothing is touching the request fd any
+    // more.
+    final exited = Completer<void>();
+    final events = port.takeWhile((m) => m != null).cast<RawLineEvent>();
+    final broadcast = events.asBroadcastStream()
+      ..listen(
+        null,
+        onDone: () {
+          if (!exited.isCompleted) exited.complete();
+        },
+      );
+
+    try {
+      await Isolate.spawn(
+        eventIsolateMain,
+        (port: port.sendPort, requestFd: requestFd, wakeupFd: wakeupFd),
+        debugName: 'gpio-events-$requestFd',
+      );
+    } on Object {
+      // Neither the descriptor nor the port may outlive a failed spawn.
+      port.close();
+      c.close(wakeupFd);
+      rethrow;
+    }
+    return GpioEventReader._(c, wakeupFd, port, broadcast, exited.future);
   }
 
   final Libc? _libc;
   final int _wakeupFd;
   final ReceivePort? _receivePort;
+  final Future<void>? _exited;
   Future<void> Function()? _onClose;
   var _closed = false;
 
@@ -152,6 +176,11 @@ class GpioEventReader {
     } finally {
       calloc.free(one);
     }
+    // Wait for the isolate to actually leave its poll/read before anyone closes
+    // the request descriptor: a descriptor number is reused the moment it is
+    // free, so a straggling read could land on an unrelated file. The timeout
+    // is a backstop against a wedged isolate, not the expected path.
+    await _exited?.timeout(const Duration(seconds: 2), onTimeout: () {});
     _receivePort!.close();
     libc.close(_wakeupFd);
   }

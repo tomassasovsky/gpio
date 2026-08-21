@@ -8,10 +8,7 @@ import 'package:meta/meta.dart';
 /// surfacing it.
 @immutable
 sealed class LineEvent {
-  const LineEvent({required this.offset});
-
-  /// The line this concerns.
-  final int offset;
+  const LineEvent();
 }
 
 /// A transition the kernel detected on a line.
@@ -19,12 +16,15 @@ sealed class LineEvent {
 final class LineEdgeEvent extends LineEvent {
   /// Creates an edge event.
   const LineEdgeEvent({
-    required super.offset,
+    required this.offset,
     required this.edge,
     required this.timestamp,
     required this.seqno,
     required this.lineSeqno,
   });
+
+  /// The line that moved.
+  final int offset;
 
   /// Which way the line moved.
   final Edge edge;
@@ -50,11 +50,18 @@ final class LineEdgeEvent extends LineEvent {
 
 /// The kernel dropped [count] events before the next one arrived.
 ///
-/// The kernel buffers events per request in a fixed-size FIFO. If a burst
+/// The kernel buffers events per **request** in a fixed-size FIFO. If a burst
 /// outruns the reader — a switch chattering, or an isolate starved by a long
-/// synchronous task — the oldest events are discarded. Every other Dart GPIO
-/// package loses them silently; the v2 ABI's sequence numbers make the loss
-/// *provable*, so it is reported instead.
+/// synchronous task — the oldest are discarded. Every other Dart GPIO package
+/// loses them silently; the v2 ABI's sequence numbers make the loss *provable*,
+/// so it is reported instead.
+///
+/// **This deliberately carries no line offset.** `seqno` counts events across
+/// the whole request, so a gap in it proves events were lost but says nothing
+/// about which lines they were on — the lost records are gone, and with them
+/// their offsets. Naming a line here would be a guess, and a per-line filter
+/// built on that guess would attribute drops to the wrong line or miss them
+/// entirely. [lines] narrows it as far as the kernel honestly allows.
 ///
 /// Seeing these means a real edge was missed. The usual fixes are a larger
 /// `eventBufferSize` on the request, or a kernel-side `debounce` so chatter
@@ -63,9 +70,9 @@ final class LineEdgeEvent extends LineEvent {
 final class LineEventsDropped extends LineEvent {
   /// Creates a dropped-event report.
   const LineEventsDropped({
-    required super.offset,
     required this.count,
     required this.seqno,
+    required this.lines,
   });
 
   /// How many events were lost.
@@ -74,8 +81,11 @@ final class LineEventsDropped extends LineEvent {
   /// The sequence number of the event that revealed the gap.
   final int seqno;
 
+  /// The lines this request holds — the set the lost events came from.
+  final List<int> lines;
+
   @override
-  String toString() => 'LineEventsDropped(line $offset, $count lost)';
+  String toString() => 'LineEventsDropped($count lost, somewhere in $lines)';
 }
 
 /// Turns raw `gpio_v2_line_event` records into [LineEvent]s, detecting gaps.
@@ -109,9 +119,9 @@ class EventDecoder {
     if (previous != null && seqno > previous + 1) {
       events.add(
         LineEventsDropped(
-          offset: offset,
           count: seqno - previous - 1,
           seqno: seqno,
+          lines: offsets,
         ),
       );
     }

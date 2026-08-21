@@ -213,7 +213,10 @@ void main() {
       final dropped = received.whereType<LineEventsDropped>().toList();
       expect(dropped, hasLength(1));
       expect(dropped.single.count, 4);
-      expect(dropped.single.offset, 3);
+      // No offset: `seqno` counts across the whole request, so a gap proves
+      // events were lost but cannot say which line they were on. All it can
+      // honestly report is the set of lines they came from.
+      expect(dropped.single.lines, [3]);
       await subscription.cancel();
     });
 
@@ -242,6 +245,61 @@ void main() {
       await pumpEventQueue();
 
       expect(done, isTrue);
+    });
+
+    test('close() completes when events was read but never listened to',
+        () async {
+      // A single-subscription controller's close() future does not complete
+      // until its stream is listened to and done, so awaiting one nobody
+      // listened to hangs forever and the descriptor is never released.
+      final request = chip.request(
+        lines: [const LineConfig.input(3, edge: Edge.both)],
+      );
+      // Obtain the stream but deliberately never listen to it.
+      final stream = request.events;
+      expect(stream, isA<Stream<LineEvent>>());
+
+      await request.close().timeout(
+            const Duration(seconds: 2),
+            onTimeout: () => fail('close() hung on an unlistened controller'),
+          );
+      expect(kernel.openDescriptors, 1, reason: 'only the chip remains');
+    });
+
+    test('two requests do not fabricate drops for each other', () async {
+      // seqno is per-request in the kernel. A counter shared across requests
+      // would look like a gap to whichever one read second.
+      final a = chip.request(
+        consumer: 'a',
+        lines: [const LineConfig.input(1, edge: Edge.both)],
+      );
+      addTearDown(a.close);
+      final b = chip.request(
+        consumer: 'b',
+        lines: [const LineConfig.input(2, edge: Edge.both)],
+      );
+      addTearDown(b.close);
+
+      final fromA = <LineEvent>[];
+      final fromB = <LineEvent>[];
+      final subA = a.events.listen(fromA.add);
+      final subB = b.events.listen(fromB.add);
+      await pumpEventQueue();
+
+      for (var i = 0; i < 4; i++) {
+        fake
+          ..setLevel(1, value: i.isEven)
+          ..setLevel(2, value: i.isEven);
+      }
+      await pumpEventQueue();
+
+      expect(fromA.whereType<LineEventsDropped>(), isEmpty);
+      expect(fromB.whereType<LineEventsDropped>(), isEmpty);
+      expect(fromA.whereType<LineEdgeEvent>(), isNotEmpty);
+      expect(fromB.whereType<LineEdgeEvent>(), isNotEmpty);
+
+      await subA.cancel();
+      await subB.cancel();
     });
 
     test('cancelling the subscription releases the reader', () async {
