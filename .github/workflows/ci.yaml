@@ -43,6 +43,37 @@ jobs:
       - name: Test (${{ matrix.arch }})
         run: dart test
 
+  # The real ioctl path, against a kernel-provided simulated chip. Everything
+  # else runs against FakeKernel, which is a model of the kernel written by the
+  # same hand as the code it checks -- this is the job that would catch a shared
+  # misunderstanding.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      - name: Load gpio-sim
+        id: sim
+        run: |
+          sudo mountpoint -q /sys/kernel/config || \
+            sudo mount -t configfs none /sys/kernel/config || true
+          sudo modprobe gpio-sim || true
+          if [ -d /sys/kernel/config/gpio-sim ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "gpio-sim is available"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::gpio-sim unavailable on this runner -- the"\
+                 "integration suite did NOT run. The fake-kernel suite is"\
+                 "what gates this build."
+          fi
+      - name: Integration tests against gpio-sim
+        if: steps.sim.outputs.available == 'true'
+        run: sudo -E env "PATH=$PATH" dart test -t integration
+
   # 32-bit ARM has no Dart-capable GitHub runner, so the layout claim is checked
   # against the real kernel header with a 32-bit compiler instead. Cheaper than
   # emulating a whole toolchain, and it tests the same proposition.

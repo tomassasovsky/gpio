@@ -1,0 +1,5 @@
+tags:
+  # Needs root and CONFIG_GPIO_SIM. Excluded from the default run so a
+  # developer's `dart test` stays green on any machine; CI opts in explicitly.
+  integration:
+    skip: "run with `dart test -t integration` (needs root + gpio-sim)"

@@ -6,8 +6,9 @@ Linux GPIO from pure Dart, over the `/dev/gpiochip*` character device using the
 No native library. No bundled binaries. No `apt install` step. Just `dart:ffi`
 and the libc that is already in your process.
 
-> **Status: in development.** The ABI layer is in place and verified; the public
-> API is landing next. Not yet published to pub.dev.
+> **Status: pre-release (0.1.0).** The API is complete and tested; it has not
+> yet been exercised on real hardware, so treat it as unproven on a live board
+> until it has been.
 
 ## Why another GPIO package
 
@@ -35,6 +36,62 @@ so scheduling affects when you *see* an event, never what time it says.
   ```
 
   then add your user to the `gpio` group and re-login.
+
+## Usage
+
+```dart
+import 'package:gpio/gpio.dart';
+
+final chip = GpioChip.byLabel('pinctrl-rp1');
+
+final request = chip.request(
+  consumer: 'my-app',
+  lines: [
+    LineConfig.input(17,
+      bias: Bias.pullUp,
+      activeLow: true,
+      edge: Edge.both,
+      debounce: Duration(milliseconds: 5)),
+    LineConfig.output(27, initialValue: false),
+  ],
+);
+
+// One ioctl, one atomic sample across every held line.
+print(request.getValues());          // {17: false, 27: false}
+request.setValue(27, value: true);
+
+request.events.listen((event) => switch (event) {
+  LineEdgeEvent(:final edge, :final timestamp) =>
+    print('$edge at $timestamp'),
+  LineEventsDropped(:final count) =>
+    print('the kernel dropped $count edges'),
+});
+
+await request.close();
+chip.close();
+```
+
+Runnable versions of both halves are in [`example/`](example/).
+
+## Testing your own code
+
+`FakeKernel` models the character device in memory, so code that talks to GPIO
+is testable on a machine that has none:
+
+```dart
+import 'package:gpio/gpio_testing.dart';
+
+final fake = FakeChip(name: 'gpiochip0', label: 'test', lineCount: 8);
+final chip = GpioChip.byLabel('test', syscalls: FakeKernel([fake]));
+
+fake.setLevel(3, value: true);       // drive a pin from "outside"
+expect(request.getValue(3), isTrue);
+```
+
+It models ownership and `EBUSY`, masked atomic access, `activeLow` inversion,
+kernel debounce, and edge events with sequence numbers — including
+`dropNextEvents`, which reproduces a FIFO overflow so you can test that your
+code notices.
 
 ## Finding your chip
 
