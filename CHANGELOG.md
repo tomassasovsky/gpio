@@ -21,8 +21,9 @@ First release.
   reported rather than silent. The v2 ABI's sequence numbers are what make this
   possible.
 - `GpioException` maps errno to an actionable message: `EACCES` gives the udev
-  rule, `EBUSY` names the consumer holding the line, `ENOTTY` explains that the
-  kernel predates the v2 interface.
+  rule, `EBUSY` names the consumer holding the line, `ENOTTY` says the path is
+  not a gpiochip, and `EINVAL` — which is what a kernel older than 5.10 actually
+  returns for a v2 ioctl — says so.
 - `package:gpio/gpio_testing.dart` — an in-memory kernel for testing GPIO code
   on machines without GPIO.
 

@@ -187,6 +187,32 @@ void main() {
     });
   });
 
+  group('errno messages name the right cause', () {
+    test('ENOTTY does not blame the kernel version', () {
+      // The VFS returns ENOTTY when the file has no ioctl handler -- it is not
+      // a gpiochip. A kernel too old for v2 does NOT land here: gpio_ioctl's
+      // `default:` branch answers EINVAL (gpiolib-cdev.c). An earlier version
+      // of this message promised "needs Linux 5.10 or newer" for a case that
+      // can never produce it.
+      final e = GpioException('GPIO_V2_GET_LINE', 25, path: '/dev/null');
+      expect(e.message, contains('not a GPIO character device'));
+      expect(e.message, isNot(contains('5.10')));
+    });
+
+    test('EINVAL is where the too-old-kernel case actually surfaces', () {
+      final e = GpioException('GPIO_V2_GET_LINE', 22, path: '/dev/gpiochip0');
+      expect(e.message, contains('5.10'));
+      expect(e.message, contains('v2 GPIO interface'));
+    });
+
+    test('EACCES gives the remedy, not just the refusal', () {
+      final e = GpioException('open', 13, path: '/dev/gpiochip0');
+      expect(e.isPermissionDenied, isTrue);
+      expect(e.message, contains('udev'));
+      expect(e.message, contains('gpio group'));
+    });
+  });
+
   test('only v2 ioctls are ever issued', () {
     final chip = GpioChip.byLabel('pinctrl-rp1', syscalls: kernel);
     addTearDown(chip.close);

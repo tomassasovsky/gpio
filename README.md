@@ -30,7 +30,9 @@ is there as a convenience when that does not matter.
 ## Requirements
 
 - Linux 5.10 or newer (when the v2 ABI landed). There is no v1 fallback, by
-  design — you cannot silently end up on the deprecated ABI.
+  design — you cannot silently end up on the deprecated ABI. An older kernel
+  answers `EINVAL` to every v2 ioctl (not `ENOTTY`, which means "not a gpiochip"),
+  and the error message says so.
 - Access to `/dev/gpiochip*`. Root works; a udev rule is better:
 
   ```

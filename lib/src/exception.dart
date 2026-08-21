@@ -53,14 +53,22 @@ class GpioException implements Exception {
       Errno.enoent => '$operation$where: no such device. Chip numbering '
           'follows probe order and moves between kernels — look the chip up '
           'by label rather than by index.',
-      Errno.enotty => '$operation$where: not a GPIO character device, or this '
-          'kernel does not know the v2 GPIO interface. That interface needs '
-          'Linux 5.10 or newer; this package does not implement the '
-          'deprecated v1 fallback.',
+      // ENOTTY comes from the VFS when the file has no ioctl handler at all --
+      // i.e. it is not a character device of this kind. It does NOT mean "old
+      // kernel": gpio_ioctl's `default:` branch returns EINVAL for an ioctl it
+      // does not recognise (gpiolib-cdev.c), so a pre-5.10 kernel lands below,
+      // not here.
+      Errno.enotty =>
+        '$operation$where: not a GPIO character device. Check the '
+            'path really is a /dev/gpiochip* node.',
       Errno.einval => '$operation$where: the kernel rejected the request as '
-          'invalid. Common causes: a line offset beyond the chip, more than '
-          '64 lines in one request, edge detection asked for on an output, '
-          'or an event clock the controller does not support.',
+          'invalid. If the chip opened and reported its info, the most likely '
+          'cause is a kernel older than 5.10, which does not know the v2 GPIO '
+          'interface at all and answers EINVAL for every v2 ioctl; this '
+          'package does not implement the deprecated v1 fallback. Otherwise: '
+          'a line offset beyond the chip, more than 64 lines in one request, '
+          'edge detection asked for on an output, or an event clock the '
+          'controller does not support.',
       Errno.enodev => '$operation$where: the device has gone away.',
       Errno.ebadf => '$operation$where: the descriptor is closed.',
       _ => '$operation$where failed with errno $errno.',
