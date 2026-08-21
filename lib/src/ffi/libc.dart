@@ -42,9 +42,25 @@ class Libc {
           ffi.IntPtr Function(ffi.Int, ffi.Pointer<ffi.Void>, ffi.IntPtr),
           int Function(int, ffi.Pointer<ffi.Void>, int)>('read');
 
-  late final ffi.Pointer<ffi.Int> Function() _errnoLocation =
-      _lib.lookupFunction<ffi.Pointer<ffi.Int> Function(),
-          ffi.Pointer<ffi.Int> Function()>('__errno_location');
+  late final ffi.Pointer<ffi.Int> Function() _errnoLocation = _lookupErrno();
+
+  /// glibc and musl export `__errno_location`; Android's bionic exports
+  /// `__errno`. Resolving lazily *and* only on a failure path would mean the
+  /// first real error on bionic surfaced as "Failed to lookup symbol" instead
+  /// of the errno it was trying to report -- the worst possible moment to lose
+  /// the diagnosis.
+  ffi.Pointer<ffi.Int> Function() _lookupErrno() {
+    for (final symbol in const ['__errno_location', '__errno']) {
+      if (_lib.providesSymbol(symbol)) {
+        return _lib.lookupFunction<ffi.Pointer<ffi.Int> Function(),
+            ffi.Pointer<ffi.Int> Function()>(symbol);
+      }
+    }
+    throw UnsupportedError(
+      'No errno accessor found in this process: tried __errno_location '
+      '(glibc, musl) and __errno (bionic).',
+    );
+  }
 
   /// The calling thread's `errno`.
   ///

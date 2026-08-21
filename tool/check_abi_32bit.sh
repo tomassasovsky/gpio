@@ -6,6 +6,12 @@
 # <linux/gpio.h> with both a 32-bit and a 64-bit compiler. If the uAPI layout
 # were width-dependent, the 32-bit build would fail.
 #
+# Sizes alone are NOT enough. The _IOC request number encodes sizeof(), so a
+# size-preserving change -- a future kernel spending some of a reserved
+# padding[] array, or two same-width fields swapping -- yields an identical
+# request number, passes a size check, and then silently misreads every field.
+# So FIELD OFFSETS are asserted here too.
+#
 # The expected sizes are PARSED OUT OF THE DART TEST rather than duplicated, so
 # the two cannot drift apart.
 set -euo pipefail
@@ -32,9 +38,45 @@ trap 'rm -f "$src"' EXIT
     set -- $pair
     printf '_Static_assert(sizeof(struct %s)==%s, "%s size drift");\n' "$1" "$2" "$1"
   done
+  # Field offsets, for the structs whose fields we actually read or write. A
+  # size-preserving reordering passes every size check and every _IOC number.
+  cat <<'ASSERTS'
+#define O(t,f,n) _Static_assert(__builtin_offsetof(struct t,f)==n, #t "." #f " offset drift")
+O(gpiochip_info, name, 0);
+O(gpiochip_info, label, 32);
+O(gpiochip_info, lines, 64);
+O(gpio_v2_line_request, offsets, 0);
+O(gpio_v2_line_request, consumer, 256);
+O(gpio_v2_line_request, config, 288);
+O(gpio_v2_line_request, num_lines, 560);
+O(gpio_v2_line_request, event_buffer_size, 564);
+O(gpio_v2_line_request, fd, 588);
+O(gpio_v2_line_config, flags, 0);
+O(gpio_v2_line_config, num_attrs, 8);
+O(gpio_v2_line_config, attrs, 32);
+O(gpio_v2_line_config_attribute, attr, 0);
+O(gpio_v2_line_config_attribute, mask, 16);
+O(gpio_v2_line_attribute, id, 0);
+O(gpio_v2_line_values, bits, 0);
+O(gpio_v2_line_values, mask, 8);
+O(gpio_v2_line_info, name, 0);
+O(gpio_v2_line_info, consumer, 32);
+O(gpio_v2_line_info, offset, 64);
+O(gpio_v2_line_info, num_attrs, 68);
+O(gpio_v2_line_info, flags, 72);
+O(gpio_v2_line_info, attrs, 80);
+O(gpio_v2_line_event, timestamp_ns, 0);
+O(gpio_v2_line_event, id, 8);
+O(gpio_v2_line_event, offset, 12);
+O(gpio_v2_line_event, seqno, 16);
+O(gpio_v2_line_event, line_seqno, 20);
+O(gpio_v2_line_info_changed, info, 0);
+O(gpio_v2_line_info_changed, timestamp_ns, 256);
+O(gpio_v2_line_info_changed, event_type, 264);
+ASSERTS
 } > "$src"
 
-echo "Checking ${#pairs[@]} struct sizes from $test_file:"
+echo "Checking ${#pairs[@]} struct sizes (from $test_file) + field offsets:"
 for pair in "${pairs[@]}"; do echo "  $pair"; done
 
 # asm/ headers live under the multiarch include dir on Debian/Ubuntu.

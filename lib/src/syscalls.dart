@@ -46,12 +46,24 @@ class LibcSyscalls implements Syscalls {
   @override
   int open(String path, int flags) {
     final native = path.toNativeUtf8();
+    final int fd;
+    final int err;
     try {
-      return _libc.open(native, flags);
+      fd = _libc.open(native, flags);
+      // Latch errno BEFORE freeing. `free` is not guaranteed errno-safe on
+      // every libc, and it can issue syscalls of its own (madvise, munmap) --
+      // so a `finally { free }` between the failed call and the caller's read
+      // can turn an EACCES into something unrelated and baffling.
+      err = fd < 0 ? _libc.errno : 0;
     } finally {
       calloc.free(native);
     }
+    _lastOpenErrno = err;
+    return fd;
   }
+
+  /// `errno` from the most recent [open], latched before its buffer was freed.
+  int _lastOpenErrno = 0;
 
   @override
   int close(int fd) => _libc.close(fd);
@@ -65,7 +77,7 @@ class LibcSyscalls implements Syscalls {
       _libc.read(fd, buf, count);
 
   @override
-  int get errno => _libc.errno;
+  int get errno => _lastOpenErrno != 0 ? _lastOpenErrno : _libc.errno;
 
   @override
   List<String> listGpioChipPaths() {
