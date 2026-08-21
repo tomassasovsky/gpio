@@ -18,7 +18,7 @@ final class LineEdgeEvent extends LineEvent {
   const LineEdgeEvent({
     required this.offset,
     required this.edge,
-    required this.timestamp,
+    required this.timestampNs,
     required this.seqno,
     required this.lineSeqno,
   });
@@ -29,13 +29,20 @@ final class LineEdgeEvent extends LineEvent {
   /// Which way the line moved.
   final Edge edge;
 
-  /// When the kernel saw it, on the request's [EventClock].
+  /// When the kernel saw it, in **nanoseconds** on the request's [EventClock].
   ///
   /// Stamped in the interrupt handler, not on delivery — so scheduling delay
   /// between the kernel and your `listen` callback affects *when you hear about
   /// it*, never *what time it says*. That is what makes these timestamps usable
-  /// for latency measurements.
-  final Duration timestamp;
+  /// for latency measurements, and why the raw nanoseconds are what the event
+  /// carries: Dart's [Duration] is microsecond-resolution and would silently
+  /// drop the low three digits of every one.
+  final int timestampNs;
+
+  /// [timestampNs] as a [Duration], for arithmetic and printing.
+  ///
+  /// Truncated to microseconds — use [timestampNs] when the difference matters.
+  Duration get timestamp => Duration(microseconds: timestampNs ~/ 1000);
 
   /// Position in the sequence of events for the whole request.
   final int seqno;
@@ -44,8 +51,9 @@ final class LineEdgeEvent extends LineEvent {
   final int lineSeqno;
 
   @override
-  String toString() => 'LineEdgeEvent(line $offset, ${edge.name}, '
-      '${timestamp.inMicroseconds}us, seq $seqno)';
+  String toString() =>
+      'LineEdgeEvent(line $offset, ${edge.name}, ${timestampNs}ns, '
+      'seq $seqno)';
 }
 
 /// The kernel dropped [count] events before the next one arrived.
@@ -132,7 +140,7 @@ class EventDecoder {
         offset: offset,
         // gpio_v2_line_event_id: 1 = RISING_EDGE, 2 = FALLING_EDGE.
         edge: id == 1 ? Edge.rising : Edge.falling,
-        timestamp: Duration(microseconds: timestampNanos ~/ 1000),
+        timestampNs: timestampNanos,
         seqno: seqno,
         lineSeqno: lineSeqno,
       ),

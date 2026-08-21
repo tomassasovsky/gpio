@@ -15,7 +15,8 @@ First release.
 - Full per-line configuration: direction, bias, drive, active-low, edge
   detection, and **kernel-side debounce**.
 - Edge events as a `Stream`, timestamped by the kernel in the interrupt
-  handler.
+  handler. `timestampNs` carries the raw nanoseconds; `timestamp` is a
+  microsecond-resolution `Duration` convenience.
 - `LineEventsDropped` — when the kernel's event FIFO overflows, the loss is
   reported rather than silent. The v2 ABI's sequence numbers are what make this
   possible.

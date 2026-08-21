@@ -22,7 +22,10 @@ option gives up at least one of them:
 - **A selectable event clock**, so timestamps mean something specific.
 
 Edge events arrive as a `Stream`, timestamped by the kernel at the interrupt —
-so scheduling affects when you *see* an event, never what time it says.
+so scheduling affects when you *see* an event, never what time it says. The raw
+`timestampNs` is what the event carries, because Dart's `Duration` is
+microsecond-resolution and would quietly drop the low three digits; `timestamp`
+is there as a convenience when that does not matter.
 
 ## Requirements
 
@@ -61,8 +64,8 @@ print(request.getValues());          // {17: false, 27: false}
 request.setValue(27, value: true);
 
 request.events.listen((event) => switch (event) {
-  LineEdgeEvent(:final edge, :final timestamp) =>
-    print('$edge at $timestamp'),
+  LineEdgeEvent(:final edge, :final timestampNs) =>
+    print('$edge at $timestampNs ns'),
   LineEventsDropped(:final count) =>
     print('the kernel dropped $count edges'),
 });

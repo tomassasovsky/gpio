@@ -96,8 +96,8 @@ void main() {
     expect(edge.offset, 3);
     expect(edge.edge, Edge.rising);
     expect(
-      edge.timestamp,
-      greaterThan(Duration.zero),
+      edge.timestampNs,
+      greaterThan(0),
       reason: 'the kernel stamped this, not us',
     );
     await subscription.cancel();

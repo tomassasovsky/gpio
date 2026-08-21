@@ -34,9 +34,10 @@ Future<void> main(List<String> args) async {
 
   final subscription = request.events.listen((event) {
     switch (event) {
-      case LineEdgeEvent(:final edge, :final timestamp):
+      case LineEdgeEvent(:final edge, :final timestampNs):
         final what = edge == Edge.rising ? 'pressed ' : 'released';
-        print('$what at ${timestamp.inMilliseconds} ms (seq ${event.seqno})');
+        // Nanoseconds, straight from the kernel's interrupt handler.
+        print('$what at ${timestampNs / 1e6} ms (seq ${event.seqno})');
       case LineEventsDropped(:final count):
         // Worth acting on: a real press was missed. Raise eventBufferSize, or
         // lengthen the debounce so the chatter never reaches the FIFO.
