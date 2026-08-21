@@ -1,0 +1,6 @@
+include: package:very_good_analysis/analysis_options.10.0.0.yaml
+
+analyzer:
+  exclude:
+    # Generated from <linux/gpio.h> by `dart run ffigen`; not hand-edited.
+    - lib/src/ffi/gpio_uapi.dart
