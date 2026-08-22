@@ -175,7 +175,7 @@ device driver rather than an OS backend.
 ## Running the tests
 
 ```sh
-dart test                  # 102 tests, no hardware needed
+dart test                  # 108 tests, no hardware needed
 dart test -t integration   # real ioctls against the kernel's gpio-sim
 ```
 
