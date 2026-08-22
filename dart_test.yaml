@@ -1,0 +1,7 @@
+tags:
+  # Declared so the runner does not warn about an unknown tag. Deliberately NO
+  # `skip:` here: a tag-level skip applies even under `-t integration`, so the
+  # CI job would report every test skipped and pass green having run nothing.
+  # The suite skips itself at runtime instead, via GpioSim.isAvailable, which
+  # also produces a reason worth reading.
+  integration:

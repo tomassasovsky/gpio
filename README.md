@@ -6,8 +6,9 @@ Linux GPIO from pure Dart, over the `/dev/gpiochip*` character device using the
 No native library. No bundled binaries. No `apt install` step. Just `dart:ffi`
 and the libc that is already in your process.
 
-> **Status: in development.** The ABI layer is in place and verified; the public
-> API is landing next. Not yet published to pub.dev.
+> **Status: pre-release (0.1.0).** The API is complete and tested; it has not
+> yet been exercised on real hardware, so treat it as unproven on a live board
+> until it has been.
 
 ## Why another GPIO package
 
@@ -21,12 +22,17 @@ option gives up at least one of them:
 - **A selectable event clock**, so timestamps mean something specific.
 
 Edge events arrive as a `Stream`, timestamped by the kernel at the interrupt —
-so scheduling affects when you *see* an event, never what time it says.
+so scheduling affects when you *see* an event, never what time it says. The raw
+`timestampNs` is what the event carries, because Dart's `Duration` is
+microsecond-resolution and would quietly drop the low three digits; `timestamp`
+is there as a convenience when that does not matter.
 
 ## Requirements
 
 - Linux 5.10 or newer (when the v2 ABI landed). There is no v1 fallback, by
-  design — you cannot silently end up on the deprecated ABI.
+  design — you cannot silently end up on the deprecated ABI. An older kernel
+  answers `EINVAL` to every v2 ioctl (not `ENOTTY`, which means "not a gpiochip"),
+  and the error message says so.
 - Access to `/dev/gpiochip*`. Root works; a udev rule is better:
 
   ```
@@ -35,6 +41,62 @@ so scheduling affects when you *see* an event, never what time it says.
   ```
 
   then add your user to the `gpio` group and re-login.
+
+## Usage
+
+```dart
+import 'package:gpio/gpio.dart';
+
+final chip = GpioChip.byLabel('pinctrl-rp1');
+
+final request = chip.request(
+  consumer: 'my-app',
+  lines: [
+    LineConfig.input(17,
+      bias: Bias.pullUp,
+      activeLow: true,
+      edge: Edge.both,
+      debounce: Duration(milliseconds: 5)),
+    LineConfig.output(27, initialValue: false),
+  ],
+);
+
+// One ioctl, one atomic sample across every held line.
+print(request.getValues());          // {17: false, 27: false}
+request.setValue(27, value: true);
+
+request.events.listen((event) => switch (event) {
+  LineEdgeEvent(:final edge, :final timestampNs) =>
+    print('$edge at $timestampNs ns'),
+  LineEventsDropped(:final count) =>
+    print('the kernel dropped $count edges'),
+});
+
+await request.close();
+chip.close();
+```
+
+Runnable versions of both halves are in [`example/`](example/).
+
+## Testing your own code
+
+`FakeKernel` models the character device in memory, so code that talks to GPIO
+is testable on a machine that has none:
+
+```dart
+import 'package:gpio/gpio_testing.dart';
+
+final fake = FakeChip(name: 'gpiochip0', label: 'test', lineCount: 8);
+final chip = GpioChip.byLabel('test', syscalls: FakeKernel([fake]));
+
+fake.setLevel(3, value: true);       // drive a pin from "outside"
+expect(request.getValue(3), isTrue);
+```
+
+It models ownership and `EBUSY`, masked atomic access, `activeLow` inversion,
+kernel debounce, and edge events with sequence numbers — including
+`dropNextEvents`, which reproduces a FIFO overflow so you can test that your
+code notices.
 
 ## Finding your chip
 
@@ -76,6 +138,23 @@ why the Linux-specific entry point is a single named constructor
 macOS is the one genuine "no": no Mac has GPIO pins, and macOS does not run on a
 Pi. Reaching pins from a Mac means a USB bridge (FT232H, MCP2221), which is a
 device driver rather than an OS backend.
+
+## Running the tests
+
+```sh
+dart test                  # 83 tests, no hardware needed
+dart test -t integration   # real ioctls against the kernel's gpio-sim
+```
+
+The default suite runs against an in-memory model of the character device, so
+it passes on any machine.
+
+The `integration` suite is the one that talks to a real `/dev/gpiochipN`, via
+the kernel's own `gpio-sim` module — the same thing libgpiod's test suite uses.
+It needs **root** and a kernel built with `CONFIG_GPIO_SIM`. Note that GitHub's
+hosted runners do *not* have it (their Azure kernel ships no such module), so
+CI reports a warning and skips; a stock Debian, Ubuntu or Raspberry Pi OS
+kernel does have it.
 
 ## Licence
 

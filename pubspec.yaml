@@ -4,9 +4,15 @@ description: >-
   v2 userspace ABI. No native library, no bundled binaries — just dart:ffi and
   libc. Kernel debounce, edge-event streams with kernel timestamps, and
   detection of edges the kernel dropped.
-version: 0.1.0-dev
+version: 0.1.0
 repository: https://github.com/tomassasovsky/gpio
 issue_tracker: https://github.com/tomassasovsky/gpio/issues
+topics:
+  - gpio
+  - linux
+  - embedded
+  - raspberry-pi
+  - ffi
 
 environment:
   sdk: ^3.6.0

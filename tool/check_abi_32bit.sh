@@ -10,7 +10,13 @@
 # size-preserving change -- a future kernel spending some of a reserved
 # padding[] array, or two same-width fields swapping -- yields an identical
 # request number, passes a size check, and then silently misreads every field.
-# So FIELD OFFSETS are asserted here too.
+# So FIELD OFFSETS are asserted here too, along with the 8-byte ALIGNMENT that
+# is the actual reason the layout is width-independent (see the block below).
+#
+# Note what -m32 does and does not prove: it is i386, not ARM EABI, and those
+# differ in exactly the place that matters -- the natural alignment of a 64-bit
+# scalar. The layout holds on ARM because of __aligned_u64 in the header, not
+# because it holds on i386.
 #
 # The expected sizes are PARSED OUT OF THE DART TEST rather than duplicated, so
 # the two cannot drift apart.
@@ -73,6 +79,23 @@ O(gpio_v2_line_event, line_seqno, 20);
 O(gpio_v2_line_info_changed, info, 0);
 O(gpio_v2_line_info_changed, timestamp_ns, 256);
 O(gpio_v2_line_info_changed, event_type, 264);
+/* The reason any of this is width-independent in the first place.
+ *
+ * i386 aligns a bare `long long` to 4 bytes; ARM EABI aligns it to 8. If the
+ * uAPI used plain __u64 the layouts would genuinely diverge, and an i386 pass
+ * would prove nothing about ARM. It does not: linux/gpio.h declares every
+ * 64-bit field __aligned_u64, forcing 8-byte alignment on EVERY ABI, precisely
+ * so a 32-bit process and a 64-bit kernel agree.
+ *
+ * So assert the MECHANISM, not just its consequence. If __aligned_u64 is ever
+ * dropped upstream, this fails on i386 immediately rather than waiting for
+ * someone to run the suite on a real 32-bit ARM board. */
+_Static_assert(_Alignof(struct gpio_v2_line_values) == 8,
+    "gpio_v2_line_values lost its 8-byte alignment -- __aligned_u64 gone?");
+_Static_assert(_Alignof(struct gpio_v2_line_attribute) == 8,
+    "gpio_v2_line_attribute lost its 8-byte alignment");
+_Static_assert(_Alignof(struct gpio_v2_line_event) == 8,
+    "gpio_v2_line_event lost its 8-byte alignment");
 ASSERTS
 } > "$src"
 
