@@ -21,8 +21,7 @@ void main() {
       expect(
         description.length,
         inInclusiveRange(minLength, maxLength),
-        reason:
-            'pub.dev gives 0/10 for "Provide a valid pubspec.yaml" outside '
+        reason: 'pub.dev gives 0/10 for "Provide a valid pubspec.yaml" outside '
             '$minLength-$maxLength characters. Got ${description.length}. '
             'The long-form pitch belongs in the README.',
       );
