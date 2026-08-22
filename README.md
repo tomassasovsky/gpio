@@ -194,6 +194,35 @@ against a *simulated* chip. This package has not yet driven a physical pin on
 real silicon — no measured press-to-event latency, no real debounce on a bouncy
 switch. Treat it as pre-release until that happens.
 
+## Checking it against real hardware
+
+`tool/hw_check.dart` is a bench harness. CI compiles it to a self-contained
+`arm64` binary (artifact `gpio-hwcheck-arm64`), so it runs on a board with no
+Dart toolchain — an appliance image has no `dart` CLI, and a Flutter release
+bundle is AOT with nothing invocable in it.
+
+```sh
+sudo ./gpio-hwcheck info                      # what chip, what lines, who holds them
+sudo ./gpio-hwcheck blink --out 17            # slow toggle, for a multimeter
+sudo ./gpio-hwcheck bias --in 27              # pull-up / pull-down / disabled
+sudo ./gpio-hwcheck activelow --out 17        # inversion, measured at the pin
+sudo ./gpio-hwcheck switch --in 27            # a real contact, with real bounce
+sudo ./gpio-hwcheck switch --in 27 --debounce 5
+sudo ./gpio-hwcheck loopback --out 17 --in 27 # jumper; measures latency
+```
+
+Offsets are GPIO numbers, not header pin numbers.
+
+A multimeter is the useful instrument here, not an LED. `bias` and `activelow`
+check things a simulated chip **structurally cannot**: `gpio-sim` has no
+voltage in it, so until someone puts a meter on a floating pin, `Bias.pullUp`
+is verified only against a fake written by the same hand as the code it
+checks. `loopback` needs one jumper — ideally through a ~330 Ω resistor, so a
+misconfiguration cannot short two outputs together.
+
+If a line is already held by the running firmware, the harness says so and
+stops rather than reporting `EBUSY` as if it were a defect.
+
 ## Licence
 
 MIT. The bindings are generated from the kernel's own `<linux/gpio.h>`, which

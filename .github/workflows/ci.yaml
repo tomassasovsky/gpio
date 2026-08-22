@@ -100,6 +100,33 @@ jobs:
             exit 1
           fi
 
+  # A self-contained binary for bench work, because the boards this package
+  # targets do not have a Dart runtime -- a Yocto image has no `dart` CLI, and
+  # a Flutter release bundle is AOT with nothing invocable in it. Built on an
+  # arm64 runner so it lands on a Pi as one scp with no toolchain.
+  #
+  # `dart compile exe` links against the build host's glibc, so the runner's
+  # version is printed here: if the target's is older the binary will not load,
+  # and the fallback is compiling in a container matching the target.
+  hw-check-binary:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      - name: Compile
+        run: |
+          dart compile exe tool/hw_check.dart -o gpio-hwcheck-arm64
+          echo "built against: $(ldd --version | head -1)"
+          ./gpio-hwcheck-arm64 --help || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpio-hwcheck-arm64
+          path: gpio-hwcheck-arm64
+          if-no-files-found: error
+
   # 32-bit ARM has no Dart-capable GitHub runner, so the layout claim is checked
   # against the real kernel header with a 32-bit compiler instead. Cheaper than
   # emulating a whole toolchain, and it tests the same proposition.
