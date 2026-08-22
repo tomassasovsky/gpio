@@ -244,14 +244,78 @@ Future<void> _bias(GpioChip chip, _Args args) async {
 // activelow — inversion at the pin, not in our bookkeeping
 // ---------------------------------------------------------------------------
 
+/// How long a pad needs to settle through a series resistor. Short enough
+/// that nobody waiting at the bench notices it.
+Future<void> _settle() => Future<void>.delayed(const Duration(milliseconds: 5));
+
+/// Probes for a wire between [out] and [inPin].
+///
+/// Both lines are claimed in one request with no inversion anywhere, the
+/// output is driven each way, and the input is read back. A wire counts as
+/// present only if the input followed the output in *both* directions.
+///
+/// The input is pulled down for the probe rather than left floating. An
+/// unconnected neighbour of a switching output will follow it through stray
+/// capacitance and look exactly like a jumper; a push-pull driver beats a
+/// ~50k pull-down, but coupling does not. Without this the probe reports a
+/// witness that is not there, and the activeLow check then "confirms"
+/// itself against noise.
+Future<bool> _hasLoopback(GpioChip chip, int out, int inPin) async {
+  if (out == inPin) return false;
+  if (chip.lineInfo(inPin).used) return false;
+
+  final request = chip.request(
+    consumer: 'gpio-hwcheck',
+    lines: [
+      LineConfig.output(out),
+      LineConfig.input(inPin, bias: Bias.pullDown),
+    ],
+  );
+  try {
+    request.setValue(out, value: true);
+    await _settle();
+    final followedHigh = request.getValue(inPin);
+    request.setValue(out, value: false);
+    await _settle();
+    final followedLow = request.getValue(inPin);
+    return followedHigh && !followedLow;
+  } finally {
+    await request.close();
+  }
+}
+
 Future<void> _activeLow(GpioChip chip, _Args args) async {
   _requireFree(chip, args.out);
-  _say('Measure between GPIO${args.out} and GND.');
+
+  // getValue() applies exactly the inversion setValue() does, so reading a
+  // line back through its own request cannot distinguish an inversion that
+  // reached the pad from one that never left our bookkeeping: both produce
+  // byte-identical output. Confirming it needs a witness from outside the
+  // inverting layer — either a person with a meter, or a second line on the
+  // far end of a wire, read with no inversion of its own.
+  final witnessed = await _hasLoopback(chip, args.out, args.inPin);
+
+  if (witnessed) {
+    _say('Jumper detected: GPIO${args.out} -> GPIO${args.inPin}.');
+    _say('Reading the pad back through GPIO${args.inPin}, which carries no');
+    _say('inversion of its own and so reports voltage rather than our logic.');
+    _say('This run is self-verifying — no meter needed.');
+  } else {
+    _say('Measure between GPIO${args.out} and GND.');
+    _say('');
+    _say('!! No jumper between GPIO${args.out} and GPIO${args.inPin}, so this');
+    _say('!! run CANNOT confirm the inversion on its own. getValue() inverts');
+    _say('!! exactly as setValue() does, so the readback column below reads');
+    _say('!! the same whether the inversion reaches the pin or stops at our');
+    _say('!! bookkeeping. The meter is the only witness in this mode.');
+    _say('!!');
+    _say('!! For a conclusive run, jumper the two pins together through');
+    _say('!! ~330 ohms and run again — it detects the wire by itself.');
+  }
   _say('');
-  _say('activeLow inverts the logical sense. Writing `true` should put');
-  _say('0 V on the pin, not 3.3 V. If the meter says otherwise, the');
-  _say('inversion is happening in our bookkeeping only.');
-  _say('');
+
+  var checked = 0;
+  var mismatched = 0;
 
   for (final activeLow in [false, true]) {
     for (final value in [true, false]) {
@@ -259,15 +323,32 @@ Future<void> _activeLow(GpioChip chip, _Args args) async {
         consumer: 'gpio-hwcheck',
         lines: [
           LineConfig.output(args.out, activeLow: activeLow),
+          if (witnessed) LineConfig.input(args.inPin, bias: Bias.pullDown),
         ],
       );
       try {
         request.setValue(args.out, value: value);
-        final volts = (value != activeLow) ? '~3.3 V' : '0 V';
+        // activeLow inverts, so the pad is the logical value XOR the flag.
+        final expectedHigh = value != activeLow;
+        final volts = expectedHigh ? '~3.3 V' : '0 V';
         _say(
           '${_clock()}  activeLow=$activeLow  setValue($value)  '
           'expect $volts   readback=${request.getValue(args.out) ? 1 : 0}',
         );
+        if (witnessed) {
+          await _settle();
+          final pad = request.getValue(args.inPin);
+          checked++;
+          if (pad == expectedHigh) {
+            _say('           pad via GPIO${args.inPin} reads '
+                '${pad ? 1 : 0}   OK');
+          } else {
+            mismatched++;
+            _say('           pad via GPIO${args.inPin} reads '
+                '${pad ? 1 : 0}   !! expected ${expectedHigh ? 1 : 0}');
+            _say('  !! the inversion did not reach the pin');
+          }
+        }
         _say('           holding ${args.dwell}s...');
         await Future<void>.delayed(Duration(seconds: args.dwell));
       } finally {
@@ -275,7 +356,29 @@ Future<void> _activeLow(GpioChip chip, _Args args) async {
       }
     }
   }
+
   _say('');
+  if (witnessed) {
+    _say('pad checks   : $checked');
+    _say('mismatches   : $mismatched');
+    if (mismatched == 0) {
+      _say('activeLow inverts at the pin, confirmed against a second line.');
+    } else {
+      // The wire was good when the run started, but saying "this is a real
+      // defect" is only honest if it is still good now.
+      final stillWired = await _hasLoopback(chip, args.out, args.inPin);
+      if (stillWired) {
+        _say('activeLow did NOT invert at the pin, and the jumper is still');
+        _say('good — it was re-probed after the run. This is a real defect.');
+      } else {
+        _say('Mismatches were seen, but the jumper is no longer detected.');
+        _say('The wire most likely came off mid-run. Re-seat it and repeat');
+        _say('before reading anything into this.');
+      }
+    }
+  } else {
+    _say('Nothing above was confirmed by this process. See the warning.');
+  }
   _say('Done.');
 }
 
@@ -357,6 +460,21 @@ Future<void> _switchTest(GpioChip chip, _Args args) async {
       ),
     ],
   );
+
+  // What the kernel actually accepted, read back while the request is still
+  // held. A released line always reports zero here, which is exactly why this
+  // had never been checked: `info` only ever inspects free lines.
+  final held = chip.lineInfo(args.inPin);
+  _say('kernel reports: debounce=${held.debouncePeriod.inMicroseconds} us  '
+      'edge=${held.edge.name}  bias=${held.bias.name}');
+  if (held.debouncePeriod != debounce) {
+    _say('  !! kernel did not report back the debounce that was requested '
+        '(asked ${debounce.inMicroseconds} us)');
+  }
+  if (held.edge != Edge.both) {
+    _say('  !! kernel did not report back the edge mode requested');
+  }
+  _say('');
 
   var edges = 0;
   var dropped = 0;
@@ -586,7 +704,8 @@ Modes
   info        enumerate chips and dump line info for the pins under test
   blink       toggle an output slowly, for a multimeter
   bias        cycle pull-up / pull-down / disabled on a floating input
-  activelow   drive with and without activeLow, to see the inversion
+  activelow   drive with and without activeLow; conclusive when out is
+              jumpered to in, meter-only otherwise (it tells you which)
   drive       push-pull vs open-drain
   switch      watch edges from a switch or a jumper to GND
   loopback    jumper out->in; measure drive-to-event latency
@@ -609,6 +728,7 @@ Examples
   sudo ./gpio-hwcheck bias --in 27
   sudo ./gpio-hwcheck switch --in 27 --seconds 30
   sudo ./gpio-hwcheck switch --in 27 --seconds 30 --debounce 5
+  sudo ./gpio-hwcheck activelow --out 17 --in 27   # self-verifying
   sudo ./gpio-hwcheck loopback --out 17 --in 27
 ''');
 }

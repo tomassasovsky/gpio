@@ -27,6 +27,13 @@ enum Edge {
 /// Internal pull resistor configuration.
 enum Bias {
   /// Leave whatever the kernel or a previous consumer set.
+  ///
+  /// Not a synonym for [disabled]. On some SoCs — BCM2711 on a Raspberry Pi 4B
+  /// among them — the pad's pull is programmed in the pin controller and
+  /// survives the line being released, so a line can arrive already pulled by
+  /// whoever held it last, and go on sourcing current into whatever is
+  /// attached after `close()`. Ask for a bias explicitly when a defined state
+  /// matters; do not read a released line as neutral.
   asIs,
 
   /// Disable both pulls.
@@ -135,6 +142,11 @@ class GpioLineInfo {
   final bool activeLow;
 
   /// The line's configured bias.
+  ///
+  /// This is what the *request* asked for, not what the pad is doing.
+  /// [Bias.asIs] means no bias was specified — it does not mean no pull is
+  /// present, since a pull programmed by a previous consumer can outlive the
+  /// request that set it. See [Bias.asIs].
   final Bias bias;
 
   /// The line's drive mode. Meaningless for inputs.
