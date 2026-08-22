@@ -5,6 +5,7 @@ import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 import 'package:gpio/src/ffi/gpio_uapi.dart';
 import 'package:gpio/src/ffi/libc.dart';
+import 'package:gpio/src/isolate_reader.dart';
 
 /// One raw `gpio_v2_line_event`, as it crosses the isolate boundary.
 ///
@@ -30,47 +31,15 @@ typedef EventIsolateArgs = ({SendPort port, int requestFd, int wakeupFd});
 /// rather than waiting out a timeout.
 Future<void> eventIsolateMain(EventIsolateArgs args) async {
   final libc = Libc.process();
-  final fds = calloc<PollFd>(2);
   final buffer = calloc<gpio_v2_line_event>();
-  final eventSize = ffi.sizeOf<gpio_v2_line_event>();
-
   try {
-    fds[0]
-      ..fd = args.requestFd
-      ..events = PollEvents.pollIn;
-    fds[1]
-      ..fd = args.wakeupFd
-      ..events = PollEvents.pollIn;
-
-    while (true) {
-      final ready = libc.poll(fds, 2, -1);
-      if (ready < 0) {
-        if (libc.errno == Errno.eintr) continue;
-        break;
-      }
-
-      // Shutdown wins over draining: once close() has fired, the request fd is
-      // about to be closed under us.
-      if (fds[1].revents & PollEvents.pollIn != 0) break;
-
-      final revents = fds[0].revents;
-      if (revents &
-              (PollEvents.pollErr | PollEvents.pollHup | PollEvents.pollNval) !=
-          0) {
-        break;
-      }
-      if (revents & PollEvents.pollIn == 0) continue;
-
-      final n = libc.read(args.requestFd, buffer.cast(), eventSize);
-      if (n < 0) {
-        if (libc.errno == Errno.eintr || libc.errno == Errno.eagain) continue;
-        break;
-      }
-      // A short read cannot yield a usable event; the kernel only ever writes
-      // whole records, so this means the descriptor is finished.
-      if (n < eventSize) break;
-
-      args.port.send(
+    pollRecords(
+      libc: libc,
+      dataFd: args.requestFd,
+      wakeupFd: args.wakeupFd,
+      recordSize: ffi.sizeOf<gpio_v2_line_event>(),
+      buffer: buffer.cast(),
+      onRecord: () => args.port.send(
         (
           offset: buffer.ref.offset,
           id: buffer.ref.id,
@@ -78,25 +47,17 @@ Future<void> eventIsolateMain(EventIsolateArgs args) async {
           seqno: buffer.ref.seqno,
           lineSeqno: buffer.ref.line_seqno,
         ),
-      );
-    }
+      ),
+    );
   } finally {
-    calloc
-      ..free(fds)
-      ..free(buffer);
+    calloc.free(buffer);
     args.port.send(null); // "no more events" — closes the stream cleanly.
   }
 }
 
 /// Owns the event isolate and the eventfd used to stop it.
 class GpioEventReader {
-  GpioEventReader._(
-    this._libc,
-    this._wakeupFd,
-    this._receivePort,
-    this.events,
-    this._exited,
-  );
+  GpioEventReader._(this._core, this.events);
 
   /// Builds a reader over an arbitrary stream, for fakes and tests.
   ///
@@ -105,11 +66,7 @@ class GpioEventReader {
   GpioEventReader.forTesting({
     required this.events,
     required Future<void> Function() onClose,
-  })  : _libc = null,
-        _wakeupFd = -1,
-        _receivePort = null,
-        _exited = null,
-        _onClose = onClose;
+  }) : _core = IsolateReaderCore.forTesting(onClose: onClose);
 
   /// Starts reading events from [requestFd].
   static Future<GpioEventReader> start(int requestFd, {Libc? libc}) async {
@@ -119,18 +76,7 @@ class GpioEventReader {
       throw StateError('eventfd failed with errno ${c.errno}');
     }
     final port = ReceivePort();
-    // The isolate sends `null` as its last act, which both ends the event
-    // stream and tells close() that nothing is touching the request fd any
-    // more.
-    final exited = Completer<void>();
-    final events = port.takeWhile((m) => m != null).cast<RawLineEvent>();
-    final broadcast = events.asBroadcastStream()
-      ..listen(
-        null,
-        onDone: () {
-          if (!exited.isCompleted) exited.complete();
-        },
-      );
+    final wired = wireIsolatePort<RawLineEvent>(port);
 
     try {
       await Isolate.spawn(
@@ -144,44 +90,22 @@ class GpioEventReader {
       c.close(wakeupFd);
       rethrow;
     }
-    return GpioEventReader._(c, wakeupFd, port, broadcast, exited.future);
+    return GpioEventReader._(
+      IsolateReaderCore(
+        libc: c,
+        wakeupFd: wakeupFd,
+        receivePort: port,
+        exited: wired.exited,
+      ),
+      wired.stream,
+    );
   }
 
-  final Libc? _libc;
-  final int _wakeupFd;
-  final ReceivePort? _receivePort;
-  final Future<void>? _exited;
-  Future<void> Function()? _onClose;
-  var _closed = false;
+  final IsolateReaderCore _core;
 
   /// The raw events, in arrival order.
   final Stream<RawLineEvent> events;
 
   /// Stops the isolate and releases the wakeup descriptor.
-  ///
-  /// Immediate: writing to the eventfd breaks the blocking `poll` rather than
-  /// leaving the isolate to notice on some later timeout.
-  Future<void> close() async {
-    if (_closed) return;
-    _closed = true;
-    final onClose = _onClose;
-    if (onClose != null) {
-      await onClose();
-      return;
-    }
-    final libc = _libc!;
-    final one = calloc<ffi.Uint64>()..value = 1;
-    try {
-      libc.write(_wakeupFd, one.cast(), 8);
-    } finally {
-      calloc.free(one);
-    }
-    // Wait for the isolate to actually leave its poll/read before anyone closes
-    // the request descriptor: a descriptor number is reused the moment it is
-    // free, so a straggling read could land on an unrelated file. The timeout
-    // is a backstop against a wedged isolate, not the expected path.
-    await _exited?.timeout(const Duration(seconds: 2), onTimeout: () {});
-    _receivePort!.close();
-    libc.close(_wakeupFd);
-  }
+  Future<void> close() => _core.close();
 }

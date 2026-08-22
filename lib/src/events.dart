@@ -148,3 +148,81 @@ class EventDecoder {
     return events;
   }
 }
+
+/// Why a line's information changed.
+///
+/// Values match `enum gpio_v2_line_changed_type` in `linux/gpio.h`.
+enum LineChangeKind {
+  /// Some process claimed the line.
+  requested(1),
+
+  /// The process holding the line released it.
+  released(2),
+
+  /// The line's configuration changed while still held.
+  reconfigured(3);
+
+  const LineChangeKind(this.value);
+
+  /// The kernel's numeric value.
+  final int value;
+
+  /// Maps a kernel value, defaulting to [reconfigured] for anything unknown.
+  ///
+  /// A future kernel adding a fourth type must not crash a running program;
+  /// "something about this line changed" stays true whatever the value means.
+  static LineChangeKind fromValue(int value) => switch (value) {
+        1 => requested,
+        2 => released,
+        _ => reconfigured,
+      };
+}
+
+/// Somebody requested, released, or reconfigured a line on the chip.
+///
+/// Distinct from [LineEvent] on purpose, and deliberately **not** part of that
+/// sealed hierarchy: these arrive on the *chip* descriptor rather than a
+/// request's, they describe ownership rather than voltage, and adding a variant
+/// to a sealed type would silently break every exhaustive `switch` a consumer
+/// has already written.
+///
+/// The point of watching is that the change need not be yours. A daemon holding
+/// a footswitch learns that someone ran `gpioset` against the same line; a
+/// service that restarts learns the previous instance let go. Without this the
+/// only signal is `EBUSY` at request time, which arrives too late to do
+/// anything but fail.
+@immutable
+final class LineInfoChanged {
+  /// Creates a line-info change report.
+  const LineInfoChanged({
+    required this.kind,
+    required this.info,
+    required this.timestampNs,
+  });
+
+  /// What happened.
+  final LineChangeKind kind;
+
+  /// The line's state *after* the change.
+  final GpioLineInfo info;
+
+  /// When the kernel saw it, in nanoseconds on `CLOCK_MONOTONIC`.
+  ///
+  /// The kernel's own comment calls this an *estimate* — unlike an edge
+  /// timestamp it is not stamped in an interrupt handler, so treat it as
+  /// ordering information rather than a measurement.
+  ///
+  /// Raw nanoseconds for the same reason [LineEdgeEvent.timestampNs] is: a
+  /// [Duration] is microsecond-resolution and would drop the low three digits.
+  final int timestampNs;
+
+  /// [timestampNs] as a [Duration], truncated to microseconds.
+  Duration get timestamp => Duration(microseconds: timestampNs ~/ 1000);
+
+  /// The line this is about.
+  int get offset => info.offset;
+
+  @override
+  String toString() => 'LineInfoChanged(line ${info.offset}, ${kind.name}'
+      '${info.consumer.isEmpty ? '' : ', by "${info.consumer}"'})';
+}
