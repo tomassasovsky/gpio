@@ -51,16 +51,31 @@ the RP1 southbridge sits on PCIe and enumerates late: older kernels expose the
 
 ## Platform support
 
-| target | how | supported |
+| target | how GPIO is reached there | status |
 |---|---|---|
-| Linux | `/dev/gpiochipN`, uAPI v2 | ✅ |
-| Android | the same interface (needs root + SELinux permits) | untested |
-| macOS, Windows | no GPIO controller exists on these machines | ❌ |
+| Linux | `/dev/gpiochipN`, uAPI v2 | ✅ supported |
+| Android | the same character device (root + SELinux permits) | should work, untested |
+| Windows on ARM, incl. a Pi 3/4/5 | `GpioClx` + **rhproxy** → WinRT `Windows.Devices.Gpio` | not supported — a second backend |
+| FreeBSD, NetBSD | `/dev/gpiocN`, a different ioctl set | not supported — a second backend |
+| macOS | no Mac has GPIO pins | out of scope |
 
-macOS and Windows are not a porting gap — those machines have no GPIO. Reaching
-pins from them means a USB bridge (FT232H, MCP2221) or a link to a
-microcontroller, which is a device driver rather than a backend for this
-package.
+Windows deserves a word, because "Windows has no GPIO" is wrong. Windows on ARM
+runs on a Raspberry Pi 3/4/5, and it is the same silicon — the pins are
+physically there. What Windows does not do is expose them as a character device:
+GPIO arrives through the `GpioClx` driver and **rhproxy**, surfaced to user mode
+as the WinRT `Windows.Devices.Gpio` API (the thing .NET's `System.Device.Gpio`
+wraps on that platform). So Windows is a **second backend behind the same public
+types**, not a port of this one — and the same is true of the BSDs, whose
+`/dev/gpiocN` speaks its own ioctls.
+
+None of that is planned work. It is why the package is called `gpio` rather than
+`linux_gpio`, why `ioctl` and file descriptors stay out of the public API, and
+why the Linux-specific entry point is a single named constructor
+(`GpioChip.byPath`) rather than the shape of the whole library.
+
+macOS is the one genuine "no": no Mac has GPIO pins, and macOS does not run on a
+Pi. Reaching pins from a Mac means a USB bridge (FT232H, MCP2221), which is a
+device driver rather than an OS backend.
 
 ## Licence
 

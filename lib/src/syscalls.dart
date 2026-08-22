@@ -2,6 +2,7 @@ import 'dart:ffi' as ffi;
 import 'dart:io';
 
 import 'package:ffi/ffi.dart';
+import 'package:gpio/src/event_isolate.dart';
 import 'package:gpio/src/ffi/libc.dart';
 import 'package:meta/meta.dart';
 
@@ -27,6 +28,12 @@ abstract interface class Syscalls {
 
   /// The calling thread's `errno`, valid immediately after a failed call.
   int get errno;
+
+  /// Opens a stream of raw edge events for a line-request descriptor.
+  ///
+  /// Behind the seam like every other syscall, so a test can supply events
+  /// without a kernel, a chip, or a spawned isolate.
+  Future<GpioEventReader> openEvents(int fd);
 
   /// Lists the GPIO character devices present, as absolute paths.
   ///
@@ -78,6 +85,10 @@ class LibcSyscalls implements Syscalls {
 
   @override
   int get errno => _lastOpenErrno != 0 ? _lastOpenErrno : _libc.errno;
+
+  @override
+  Future<GpioEventReader> openEvents(int fd) =>
+      GpioEventReader.start(fd, libc: _libc);
 
   @override
   List<String> listGpioChipPaths() {
