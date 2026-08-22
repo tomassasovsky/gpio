@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:ffi';
 
-import 'package:gpio/src/chip.dart';
 import 'package:gpio/src/event_isolate.dart';
+import 'package:gpio/src/events.dart';
 import 'package:gpio/src/ffi/gpio_uapi.dart';
 import 'package:gpio/src/ffi/ioctl.dart';
 import 'package:gpio/src/ffi/libc.dart';
+import 'package:gpio/src/ffi/names.dart';
+import 'package:gpio/src/info_isolate.dart';
 import 'package:gpio/src/line_config.dart';
 import 'package:gpio/src/syscalls.dart';
 
@@ -109,6 +111,14 @@ class FakeKernel implements Syscalls {
 
   final Map<int, _FakeEvents> _eventReaders = {};
 
+  /// Which line offsets each chip descriptor is watching, per
+  /// `GPIO_V2_GET_LINEINFO_WATCH_IOCTL`.
+  final Map<int, Set<int>> _watched = {};
+  final Map<int, StreamController<RawInfoEvent>> _infoReaders = {};
+
+  /// Monotonic stand-in for the kernel's change timestamps.
+  int _infoClockNs = 0;
+
   /// Drops this many upcoming events instead of delivering them, without
   /// reusing their sequence numbers — exactly what the kernel's per-request
   /// FIFO does when it overflows.
@@ -127,6 +137,51 @@ class FakeKernel implements Syscalls {
     _eventReaders[fd] = reader;
     request.chip.onEdge = _emit;
     return reader.asReader();
+  }
+
+  @override
+  Future<GpioInfoReader> openLineInfoEvents(int chipFd) async {
+    if (!_chipFds.containsKey(chipFd)) {
+      throw StateError('no such chip descriptor: $chipFd');
+    }
+    final controller = StreamController<RawInfoEvent>();
+    _infoReaders[chipFd] = controller;
+    return GpioInfoReader.forTesting(
+      events: controller.stream,
+      onClose: () async {
+        _infoReaders.remove(chipFd);
+        await controller.close();
+      },
+    );
+  }
+
+  /// Reports a line-info change to every chip descriptor watching [offset].
+  ///
+  /// Mirrors the kernel: the report goes to watchers of the *chip*, including
+  /// the process that caused the change. There is no "not mine" filter.
+  void _emitInfoChange(FakeChip chip, int offset, int changeType) {
+    _infoClockNs += 1000;
+    for (final entry in _infoReaders.entries) {
+      if (_chipFds[entry.key] != chip) continue;
+      if (!(_watched[entry.key]?.contains(offset) ?? false)) continue;
+      final owner = chip.owners[offset];
+      final held = _requestFds.values
+          .where((r) => r.chip == chip && r.indexOf(offset) != null)
+          .firstOrNull;
+      entry.value.add(
+        (
+          offset: offset,
+          name: chip.lineNames[offset] ?? '',
+          consumer: owner ?? '',
+          flags: held == null
+              ? 0
+              : held.flagsFor(offset) | (owner == null ? 0 : LineFlag.used),
+          debounceMicros: held?.debounceFor(offset) ?? 0,
+          timestampNanos: _infoClockNs,
+          changeType: changeType,
+        ),
+      );
+    }
   }
 
   void _emit(int offset, {required bool level}) {
@@ -179,8 +234,14 @@ class FakeKernel implements Syscalls {
     final request = _requestFds.remove(fd);
     if (request != null) {
       request.offsets.forEach(request.chip.owners.remove);
+      for (final offset in request.offsets) {
+        _emitInfoChange(request.chip, offset, LineChangeKind.released.value);
+      }
       return 0;
     }
+    // A chip descriptor going away takes its watches with it.
+    _watched.remove(fd);
+    unawaited(_infoReaders.remove(fd)?.close() ?? Future.value());
     if (_chipFds.remove(fd) != null) return 0;
     _errno = Errno.ebadf;
     return -1;
@@ -201,6 +262,8 @@ class FakeKernel implements Syscalls {
     if (request == GpioIoctl.v2LineGetValues) return _getValues(fd, argp);
     if (request == GpioIoctl.v2LineSetValues) return _setValues(fd, argp);
     if (request == GpioIoctl.v2LineSetConfig) return _setConfig(fd, argp);
+    if (request == GpioIoctl.v2WatchLineInfo) return _watchLineInfo(fd, argp);
+    if (request == GpioIoctl.unwatchLineInfo) return _unwatchLineInfo(fd, argp);
     _errno = Errno.enotty;
     return -1;
   }
@@ -253,6 +316,41 @@ class FakeKernel implements Syscalls {
     return 0;
   }
 
+  int _watchLineInfo(int fd, Pointer<Void> argp) {
+    final chip = _chipFds[fd];
+    if (chip == null) {
+      _errno = Errno.ebadf;
+      return -1;
+    }
+    final offset = argp.cast<gpio_v2_line_info>().ref.offset;
+    if (offset < 0 || offset >= chip.lineCount) {
+      _errno = Errno.einval;
+      return -1;
+    }
+    // The kernel rejects a second watch on the same line from the same
+    // descriptor, and fills the struct in on success -- both worth modelling,
+    // because both are things caller code can get wrong.
+    if (!(_watched[fd] ??= <int>{}).add(offset)) {
+      _errno = Errno.ebusy;
+      return -1;
+    }
+    return _lineInfo(fd, argp);
+  }
+
+  int _unwatchLineInfo(int fd, Pointer<Void> argp) {
+    final chip = _chipFds[fd];
+    if (chip == null) {
+      _errno = Errno.ebadf;
+      return -1;
+    }
+    final offset = argp.cast<Uint32>().value;
+    if (!(_watched[fd]?.remove(offset) ?? false)) {
+      _errno = Errno.ebusy;
+      return -1;
+    }
+    return 0;
+  }
+
   int _getLine(int fd, Pointer<Void> argp) {
     final chip = _chipFds[fd];
     if (chip == null) {
@@ -284,6 +382,9 @@ class FakeKernel implements Syscalls {
     final requestFd = _nextFd++;
     _requestFds[requestFd] = decoded;
     req.fd = requestFd;
+    for (final offset in offsets) {
+      _emitInfoChange(chip, offset, LineChangeKind.requested.value);
+    }
     return 0;
   }
 
@@ -344,6 +445,9 @@ class FakeKernel implements Syscalls {
     request
       ..applyConfig(argp.cast<gpio_v2_line_config>().ref)
       ..applyOutputValues();
+    for (final offset in request.offsets) {
+      _emitInfoChange(request.chip, offset, LineChangeKind.reconfigured.value);
+    }
     return 0;
   }
 }

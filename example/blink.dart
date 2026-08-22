@@ -33,6 +33,6 @@ Future<void> main(List<String> args) async {
   } finally {
     request.setValue(offset, value: false);
     await request.close();
-    chip.close();
+    await chip.close();
   }
 }

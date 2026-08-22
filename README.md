@@ -73,10 +73,43 @@ request.events.listen((event) => switch (event) {
 });
 
 await request.close();
-chip.close();
+await chip.close();
 ```
 
 Runnable versions of both halves are in [`example/`](example/).
+
+## Knowing when someone else takes a line
+
+`lineInfo()` is a snapshot, stale the moment it returns. `watchLineInfo` reports
+each change as the kernel sees it — **including changes made by other
+processes**:
+
+```dart
+final chip = GpioChip.byLabel('pinctrl-rp1');
+
+chip.watchLineInfo([17, 27]).listen((change) {
+  switch (change.kind) {
+    case LineChangeKind.requested:
+      print('line ${change.offset} taken by "${change.info.consumer}"');
+    case LineChangeKind.released:
+      print('line ${change.offset} is free again');
+    case LineChangeKind.reconfigured:
+      print('line ${change.offset} reconfigured');
+  }
+});
+```
+
+Without this, a collision with another process shows up only as `EBUSY` at
+request time — by which point there is nothing to do but fail. A daemon holding
+a footswitch learns that someone ran `gpioset` against the same line; a service
+restarting learns the previous instance let go.
+
+Watching costs nothing until something changes: the kernel pushes, so there is
+no polling. `unwatchLineInfo(offset)` stops one line, and closing the chip stops
+everything.
+
+Note that lines **this** process requests report here too — the kernel does not
+distinguish your own claims from anyone else's.
 
 ## Testing your own code
 

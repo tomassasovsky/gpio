@@ -48,5 +48,5 @@ Future<void> main(List<String> args) async {
   await ProcessSignal.sigint.watch().first;
   await subscription.cancel();
   await request.close();
-  chip.close();
+  await chip.close();
 }

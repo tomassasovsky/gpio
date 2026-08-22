@@ -124,15 +124,14 @@ void main() {
       );
     });
 
-    test('using a closed chip is a StateError, not a bad descriptor', () {
-      chip.close();
+    test('using a closed chip is a StateError, not a bad descriptor', () async {
+      await chip.close();
       expect(() => chip.lineInfo(0), throwsStateError);
     });
 
-    test('close is idempotent', () {
-      chip
-        ..close()
-        ..close();
+    test('close is idempotent', () async {
+      await chip.close();
+      await chip.close();
       expect(chip.isClosed, isTrue);
     });
   });
@@ -177,12 +176,12 @@ void main() {
       expect(second.offsets, [3]);
     });
 
-    test('a request outlives the chip it came from', () {
+    test('a request outlives the chip it came from', () async {
       // The kernel ties ownership to the request descriptor, not the chip's.
       final chip = GpioChip.byLabel('pinctrl-rp1', syscalls: kernel);
       final request = chip.request(lines: [const LineConfig.output(2)]);
       addTearDown(request.close);
-      chip.close();
+      await chip.close();
       expect(() => request.setValue(2, value: true), returnsNormally);
     });
   });

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:ffi/ffi.dart';
 import 'package:gpio/src/event_isolate.dart';
 import 'package:gpio/src/ffi/libc.dart';
+import 'package:gpio/src/info_isolate.dart';
 import 'package:meta/meta.dart';
 
 /// The single seam between this package and the kernel.
@@ -34,6 +35,13 @@ abstract interface class Syscalls {
   /// Behind the seam like every other syscall, so a test can supply events
   /// without a kernel, a chip, or a spawned isolate.
   Future<GpioEventReader> openEvents(int fd);
+
+  /// Opens a stream of raw line-info changes for a **chip** descriptor.
+  ///
+  /// Separate from [openEvents] because it watches a different descriptor and
+  /// yields a different record: ownership changes on the chip, not edges on a
+  /// request.
+  Future<GpioInfoReader> openLineInfoEvents(int chipFd);
 
   /// Lists the GPIO character devices present, as absolute paths.
   ///
@@ -89,6 +97,10 @@ class LibcSyscalls implements Syscalls {
   @override
   Future<GpioEventReader> openEvents(int fd) =>
       GpioEventReader.start(fd, libc: _libc);
+
+  @override
+  Future<GpioInfoReader> openLineInfoEvents(int chipFd) =>
+      GpioInfoReader.start(chipFd, libc: _libc);
 
   @override
   List<String> listGpioChipPaths() {
