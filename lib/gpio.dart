@@ -17,7 +17,7 @@
 /// print(request.getValue(17));
 /// request.setValue(27, value: true);
 /// await request.close();
-/// chip.close();
+/// await chip.close();
 /// ```
 ///
 /// Look chips up by **label**, never by index: numbering follows probe order
@@ -25,7 +25,13 @@
 library;
 
 export 'src/chip.dart' show GpioChip;
-export 'src/events.dart' show LineEdgeEvent, LineEvent, LineEventsDropped;
+export 'src/events.dart'
+    show
+        LineChangeKind,
+        LineEdgeEvent,
+        LineEvent,
+        LineEventsDropped,
+        LineInfoChanged;
 export 'src/exception.dart';
 export 'src/line_config.dart' show LineConfig;
 export 'src/line_request.dart';

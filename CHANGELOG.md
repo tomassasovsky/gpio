@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.2.0
+
+**Breaking:** `GpioChip.close()` returns a `Future` and must be awaited.
+
+A line-info watcher blocks in `poll(2)` on the chip's own descriptor, so the
+chip cannot close that descriptor until the watcher has actually left the
+syscall — descriptor numbers are reused the instant they are free, and a
+straggling read would land on an unrelated file. `LineRequest.close()` is
+already async for exactly this reason; the chip now matches. Add `await`.
+
+- **`GpioChip.watchLineInfo(offsets)`** — a `Stream<LineInfoChanged>` of
+  requests, releases and reconfigurations, as the kernel reports them,
+  *including changes made by other processes*. `unwatchLineInfo(offset)` stops
+  reporting one line; `watchedLines` says which are being watched.
+
+  `lineInfo()` gives a snapshot that is stale the moment it returns. Until now
+  a collision with another process surfaced only as `EBUSY` at request time,
+  too late to do anything but fail.
+- `LineInfoChanged` carries the change kind, the line's state *after* the
+  change, and the kernel's timestamp. It is deliberately **not** part of the
+  `LineEvent` sealed hierarchy: these arrive on a different descriptor and mean
+  something different, and adding a variant to a sealed type would break every
+  exhaustive `switch` already written against it.
+- `LineChangeKind.fromValue` maps an unrecognised kind to `reconfigured` rather
+  than throwing, so a future kernel adding a fourth type cannot kill a running
+  program.
+- `FakeKernel` models watches, so consumers can test this without hardware.
+
+The ioctls were already bound in the ABI layer; only the public surface was
+missing.
+
+## 0.1.1
+
+- Shortened the package description to the 60-180 characters pub.dev scores.
+  0.1.0 shipped at ~258 and took 0/10 on "Provide a valid pubspec.yaml" for it;
+  the long-form pitch lives in the README, where it belongs. A published
+  pubspec is immutable, so this needed a release of its own. A test now pins
+  the range.
+
+No API changes.
+
 ## 0.1.0
 
 First release.

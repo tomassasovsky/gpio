@@ -1,53 +1,19 @@
-import 'dart:convert';
+import 'dart:async';
 import 'dart:ffi' as ffi;
 
 import 'package:ffi/ffi.dart';
+import 'package:gpio/src/events.dart';
 import 'package:gpio/src/exception.dart';
 import 'package:gpio/src/ffi/gpio_uapi.dart';
 import 'package:gpio/src/ffi/ioctl.dart';
 import 'package:gpio/src/ffi/libc.dart';
+import 'package:gpio/src/ffi/names.dart';
+import 'package:gpio/src/info_isolate.dart';
 import 'package:gpio/src/line_config.dart';
 import 'package:gpio/src/line_request.dart';
 import 'package:gpio/src/models.dart';
 import 'package:gpio/src/request_encoder.dart';
 import 'package:gpio/src/syscalls.dart';
-
-/// Reads a fixed-width, NUL-padded C name field into a Dart string.
-///
-/// `ffi.Char` is signed on x86-64 and unsigned on ARM, so a byte above 0x7F
-/// arrives as a negative number on one and a positive one on the other. Masking
-/// to a byte before decoding keeps both honest — and the field is UTF-8, not
-/// Latin-1, so it is decoded as such rather than treated as code units.
-String readName(ffi.Array<ffi.Char> array, int capacity) {
-  final bytes = <int>[];
-  for (var i = 0; i < capacity; i++) {
-    final c = array[i] & 0xFF;
-    if (c == 0) break;
-    bytes.add(c);
-  }
-  // Malformed bytes become U+FFFD: a chip with an odd name is not a reason to
-  // throw out of a discovery loop.
-  return const Utf8Decoder(allowMalformed: true).convert(bytes);
-}
-
-/// Writes [value] into a fixed-width C name field as UTF-8, truncating on a
-/// character boundary if needed and always leaving room for the NUL.
-void writeName(ffi.Array<ffi.Char> array, int capacity, String value) {
-  var bytes = const Utf8Encoder().convert(value);
-  if (bytes.length > capacity - 1) {
-    // Truncate without splitting a multi-byte sequence: back off to the last
-    // byte that is not a UTF-8 continuation byte (0b10xxxxxx).
-    var end = capacity - 1;
-    while (end > 0 && (bytes[end] & 0xC0) == 0x80) {
-      end--;
-    }
-    bytes = bytes.sublist(0, end);
-  }
-  for (var i = 0; i < bytes.length; i++) {
-    array[i] = bytes[i];
-  }
-  array[bytes.length] = 0;
-}
 
 /// One GPIO controller, opened through its character device.
 class GpioChip {
@@ -92,7 +58,7 @@ class GpioChip {
       }
       if (chip.info.label == label) return chip;
       tried.add('${chip.info.name} (${chip.info.label})');
-      chip.close();
+      chip._closeDescriptor();
     }
     throw StateError(
       'No GPIO chip labelled "$label". Found: '
@@ -117,7 +83,7 @@ class GpioChip {
     } on Object {
       // Never strand descriptors the caller has no handle on.
       for (final chip in opened) {
-        chip.close();
+        chip._closeDescriptor();
       }
       rethrow;
     }
@@ -265,11 +231,171 @@ class GpioChip {
     return null;
   }
 
+  StreamController<LineInfoChanged>? _infoChanges;
+  GpioInfoReader? _infoReader;
+  final _watched = <int>{};
+
+  /// Requests, releases and reconfigurations of [offsets], as the kernel sees
+  /// them — including changes made by **other processes**.
+  ///
+  /// This is the honest answer to "who holds this pin?". [lineInfo] gives a
+  /// snapshot that is stale the moment it returns; this reports each change as
+  /// it happens. Without it, a collision only surfaces as `EBUSY` at request
+  /// time, by which point there is nothing to do but fail.
+  ///
+  /// Watching costs nothing until something changes: the kernel pushes, so
+  /// there is no polling.
+  ///
+  /// The stream is single-subscription and owns an isolate. The chip must stay
+  /// open for as long as you listen — the events arrive on the chip's own
+  /// descriptor — and [close] stops it.
+  ///
+  /// Note that a line this process requests will report itself here too: the
+  /// kernel does not distinguish your own claims from anyone else's.
+  Stream<LineInfoChanged> watchLineInfo(Iterable<int> offsets) {
+    _checkOpen();
+    final wanted = offsets.toList();
+    if (wanted.isEmpty) {
+      throw ArgumentError.value(offsets, 'offsets', 'must not be empty');
+    }
+    wanted.forEach(_checkOffset);
+
+    final buf = calloc<gpio_v2_line_info>();
+    try {
+      for (final offset in wanted) {
+        if (_watched.contains(offset)) continue;
+        // The struct is reused across iterations, and the kernel fills it in on
+        // success -- so every field must be reset, not just the offset.
+        for (var i = 0; i < ffi.sizeOf<gpio_v2_line_info>(); i++) {
+          buf.cast<ffi.Uint8>()[i] = 0;
+        }
+        buf.ref.offset = offset;
+        if (_ioctl(GpioIoctl.v2WatchLineInfo, buf.cast()) < 0) {
+          throw GpioException(
+            'GPIO_V2_GET_LINEINFO_WATCH',
+            _syscalls.errno,
+            path: info.path,
+          );
+        }
+        _watched.add(offset);
+      }
+    } finally {
+      calloc.free(buf);
+    }
+
+    if (_infoChanges == null) _startInfoChanges();
+    return _infoChanges!.stream;
+  }
+
+  /// Stops reporting changes for [offset].
+  ///
+  /// Unwatching a line that is not watched is a no-op rather than an error: the
+  /// caller's intent — "I do not want reports for this line" — is satisfied
+  /// either way.
+  void unwatchLineInfo(int offset) {
+    _checkOpen();
+    _checkOffset(offset);
+    if (!_watched.remove(offset)) return;
+    final buf = calloc<ffi.Uint32>()..value = offset;
+    try {
+      if (_ioctl(GpioIoctl.unwatchLineInfo, buf.cast()) < 0) {
+        throw GpioException(
+          'GPIO_GET_LINEINFO_UNWATCH',
+          _syscalls.errno,
+          path: info.path,
+        );
+      }
+    } finally {
+      calloc.free(buf);
+    }
+  }
+
+  /// The lines currently watched by [watchLineInfo], in ascending order.
+  List<int> get watchedLines => _watched.toList()..sort();
+
+  void _startInfoChanges() {
+    late final StreamController<LineInfoChanged> controller;
+    StreamSubscription<RawInfoEvent>? subscription;
+
+    controller = StreamController<LineInfoChanged>(
+      onListen: () async {
+        try {
+          final reader = await _syscalls.openLineInfoEvents(_fd);
+          _infoReader = reader;
+          // The chip may have been closed while the isolate was starting.
+          if (_closed) {
+            await reader.close();
+            await controller.close();
+            return;
+          }
+          subscription = reader.events.listen(
+            (raw) => controller.add(
+              LineInfoChanged(
+                kind: LineChangeKind.fromValue(raw.changeType),
+                info: lineInfoFromFields(
+                  offset: raw.offset,
+                  name: raw.name,
+                  consumer: raw.consumer,
+                  flags: raw.flags,
+                  debounceMicros: raw.debounceMicros,
+                ),
+                timestampNs: raw.timestampNanos,
+              ),
+            ),
+            onDone: controller.close,
+            onError: controller.addError,
+          );
+        } on Object catch (error, stack) {
+          if (!controller.isClosed) {
+            controller.addError(error, stack);
+            unawaited(controller.close());
+          }
+        }
+      },
+      onCancel: () async {
+        await subscription?.cancel();
+        await _infoReader?.close();
+        _infoReader = null;
+        _infoChanges = null;
+      },
+    );
+    _infoChanges = controller;
+  }
+
   /// Releases the chip descriptor. Idempotent.
   ///
   /// Does not affect any [LineRequest] taken from it: the kernel ties line
   /// ownership to the request's own descriptor, so requests outlive their chip.
-  void close() {
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    // Stop the watcher before the descriptor goes: it is blocked in poll() on
+    // this exact fd, and descriptor numbers are reused the instant they are
+    // free. This is why close() is async -- the same race the edge-event path
+    // already had to fix.
+    await _infoReader?.close();
+    _infoReader = null;
+    final changes = _infoChanges;
+    _infoChanges = null;
+    if (changes != null && !changes.isClosed) {
+      // A controller nobody listened to never completes its close(); awaiting
+      // one would hang here forever.
+      if (changes.hasListener) {
+        await changes.close();
+      } else {
+        unawaited(changes.close());
+      }
+    }
+    _syscalls.close(_fd);
+  }
+
+  /// Closes just the descriptor, for chips that provably have no watcher.
+  ///
+  /// [GpioChip.byLabel] and [GpioChip.list] open chips and discard the ones
+  /// they do not want. Those have never been handed to a caller, so nothing
+  /// could have started a line-info stream on them — which makes the async
+  /// half of [close] dead weight in a place that cannot await anyway.
+  void _closeDescriptor() {
     if (_closed) return;
     _closed = true;
     _syscalls.close(_fd);
@@ -304,18 +430,38 @@ class GpioChip {
 }
 
 GpioLineInfo _decodeLineInfo(gpio_v2_line_info raw) {
-  final flags = raw.flags;
-  var debounce = Duration.zero;
+  var debounce = 0;
   for (var i = 0; i < raw.num_attrs; i++) {
     final attr = raw.attrs[i];
     if (attr.id == gpio_v2_line_attr_id.GPIO_V2_LINE_ATTR_ID_DEBOUNCE.value) {
-      debounce = Duration(microseconds: attr.unnamed.debounce_period_us);
+      debounce = attr.unnamed.debounce_period_us;
     }
   }
-  return GpioLineInfo(
+  return lineInfoFromFields(
     offset: raw.offset,
     name: readName(raw.name, GPIO_MAX_NAME_SIZE),
     consumer: readName(raw.consumer, GPIO_MAX_NAME_SIZE),
+    flags: raw.flags,
+    debounceMicros: debounce,
+  );
+}
+
+/// Builds a [GpioLineInfo] from the flat fields of a `gpio_v2_line_info`.
+///
+/// Separate from the struct so the line-info watcher can reuse it: a `Struct`
+/// is a view onto native memory the reader isolate immediately reuses, so what
+/// crosses the isolate boundary is these fields, not the struct.
+GpioLineInfo lineInfoFromFields({
+  required int offset,
+  required String name,
+  required String consumer,
+  required int flags,
+  required int debounceMicros,
+}) {
+  return GpioLineInfo(
+    offset: offset,
+    name: name,
+    consumer: consumer,
     direction: flags & LineFlag.output != 0
         ? LineDirection.output
         : LineDirection.input,
@@ -338,6 +484,6 @@ GpioLineInfo _decodeLineInfo(gpio_v2_line_info raw) {
       LineFlag.edgeFalling => Edge.falling,
       _ => Edge.none,
     },
-    debouncePeriod: debounce,
+    debouncePeriod: Duration(microseconds: debounceMicros),
   );
 }

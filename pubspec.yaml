@@ -1,10 +1,9 @@
 name: gpio
 description: >-
-  Linux GPIO from pure Dart, over the /dev/gpiochip character device using the
-  v2 userspace ABI. No native library, no bundled binaries — just dart:ffi and
-  libc. Kernel debounce, edge-event streams with kernel timestamps, and
-  detection of edges the kernel dropped.
-version: 0.1.0
+  Linux GPIO from pure Dart over the /dev/gpiochip v2 ABI — no native
+  library. Kernel debounce, edge-event streams with kernel timestamps, and
+  dropped-edge detection.
+version: 0.2.0
 repository: https://github.com/tomassasovsky/gpio
 issue_tracker: https://github.com/tomassasovsky/gpio/issues
 topics:
@@ -25,3 +24,4 @@ dev_dependencies:
   ffigen: ^19.1.0
   test: ^1.25.0
   very_good_analysis: ^10.0.0
+  yaml: ^3.1.2
