@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1
+
+- Shortened the package description to the 60-180 characters pub.dev scores.
+  0.1.0 shipped at ~258 and took 0/10 on "Provide a valid pubspec.yaml" for it;
+  the long-form pitch lives in the README, where it belongs. A published
+  pubspec is immutable, so this needed a release of its own. A test now pins
+  the range.
+
+No API changes.
+
 ## 0.1.0
 
 First release.
