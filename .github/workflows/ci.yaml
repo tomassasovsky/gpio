@@ -105,11 +105,15 @@ jobs:
   # a Flutter release bundle is AOT with nothing invocable in it. Built on an
   # arm64 runner so it lands on a Pi as one scp with no toolchain.
   #
-  # `dart compile exe` links against the build host's glibc, so the runner's
-  # version is printed here: if the target's is older the binary will not load,
-  # and the fallback is compiling in a container matching the target.
+  # `dart compile exe` links against the build host's glibc, and glibc is
+  # forward-compatible but not backward: a binary built against 2.39 will not
+  # load on an older image. Appliance images are routinely older than the
+  # newest runner -- Yocto Kirkstone is 2.35 -- so this deliberately builds on
+  # the OLDEST arm64 runner available rather than the newest, and prints the
+  # highest GLIBC_ symbol version the result actually requires. That number,
+  # not the build host's, is what a target has to satisfy.
   hw-check-binary:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v5
       - uses: dart-lang/setup-dart@v1
@@ -119,8 +123,10 @@ jobs:
       - name: Compile
         run: |
           dart compile exe tool/hw_check.dart -o gpio-hwcheck-arm64
-          echo "built against: $(ldd --version | head -1)"
-          ./gpio-hwcheck-arm64 --help || true
+          echo "build host glibc : $(ldd --version | head -1)"
+          echo "binary requires  : $(objdump -T gpio-hwcheck-arm64 \
+            | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+          ./gpio-hwcheck-arm64 --help
       - uses: actions/upload-artifact@v4
         with:
           name: gpio-hwcheck-arm64
