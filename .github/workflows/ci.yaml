@@ -48,13 +48,16 @@ jobs:
   # same hand as the code it checks -- this is the job that would catch a shared
   # misunderstanding.
   #
-  # KNOWN: GitHub's hosted runners cannot run it. Their Azure kernel ships no
-  # gpio-sim module ("modprobe: FATAL: Module gpio-sim not found in directory
-  # /lib/modules/6.17.0-1022-azure"), so this job currently always takes the
-  # warn-and-skip path. It is kept green-but-loud on purpose: the suite runs
-  # unchanged on any machine whose kernel has CONFIG_GPIO_SIM, including a
-  # Raspberry Pi, and that is where it earns its keep. Getting it running in CI
-  # would mean booting a QEMU VM with a stock distro kernel.
+  # The runner's Azure kernel carries no gpio-sim in its base package, which is
+  # what made this permanently warn-and-skip. Ubuntu ships the driver in
+  # linux-modules-extra-<release> instead, so the fix is to install the module
+  # set rather than to boot a QEMU VM with a distro kernel -- which was the
+  # other candidate, and is dramatically more machinery for the same result.
+  #
+  # There is no warn-and-skip path any more. A skip that keeps the build green
+  # reads as "covered" and this suite spent its whole life so far not running.
+  # If gpio-sim cannot be loaded, that is now a failure to be fixed, not a
+  # notice to be scrolled past.
   integration:
     runs-on: ubuntu-latest
     steps:
@@ -63,24 +66,39 @@ jobs:
         with:
           sdk: stable
       - run: dart pub get
+      - name: Install the kernel module set carrying gpio-sim
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || {
+            echo "::error::No linux-modules-extra for $(uname -r)."
+            echo "The runner image kernel changed. Check what is available:"
+            apt-cache search "linux-modules-extra" | head -20
+            exit 1
+          }
       - name: Load gpio-sim
-        id: sim
         run: |
           sudo mountpoint -q /sys/kernel/config || \
-            sudo mount -t configfs none /sys/kernel/config || true
-          sudo modprobe gpio-sim || true
-          if [ -d /sys/kernel/config/gpio-sim ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-            echo "gpio-sim is available"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::gpio-sim unavailable on this runner -- the"\
-                 "integration suite did NOT run. The fake-kernel suite is"\
-                 "what gates this build."
-          fi
+            sudo mount -t configfs none /sys/kernel/config
+          sudo modprobe gpio-sim
+          test -d /sys/kernel/config/gpio-sim || {
+            echo "::error::gpio-sim loaded but configfs group is missing."
+            exit 1
+          }
+          echo "gpio-sim is loaded and configfs is mounted"
       - name: Integration tests against gpio-sim
-        if: steps.sim.outputs.available == 'true'
-        run: sudo -E env "PATH=$PATH" dart test -t integration
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" dart test -t integration \
+            | tee /tmp/integration.log
+          # The suite skips itself when GpioSim.isAvailable is false, which
+          # would pass this job having executed nothing -- the exact failure
+          # mode this job exists to end. A skip here is now a hard error.
+          if grep -qE '[~][0-9]+' /tmp/integration.log; then
+            echo "::error::The integration suite skipped instead of running."
+            echo "gpio-sim loaded, so GpioSim.isAvailable disagrees -- check"
+            echo "the configfs path and permissions it probes."
+            exit 1
+          fi
 
   # 32-bit ARM has no Dart-capable GitHub runner, so the layout claim is checked
   # against the real kernel header with a 32-bit compiler instead. Cheaper than

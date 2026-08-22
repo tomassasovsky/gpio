@@ -175,7 +175,7 @@ device driver rather than an OS backend.
 ## Running the tests
 
 ```sh
-dart test                  # 83 tests, no hardware needed
+dart test                  # 108 tests, no hardware needed
 dart test -t integration   # real ioctls against the kernel's gpio-sim
 ```
 
@@ -184,10 +184,15 @@ it passes on any machine.
 
 The `integration` suite is the one that talks to a real `/dev/gpiochipN`, via
 the kernel's own `gpio-sim` module — the same thing libgpiod's test suite uses.
-It needs **root** and a kernel built with `CONFIG_GPIO_SIM`. Note that GitHub's
-hosted runners do *not* have it (their Azure kernel ships no such module), so
-CI reports a warning and skips; a stock Debian, Ubuntu or Raspberry Pi OS
-kernel does have it.
+It needs **root** and a kernel with `CONFIG_GPIO_SIM`. On GitHub's hosted
+runners the driver ships in `linux-modules-extra-$(uname -r)`, which the runner
+image does not install by default; CI installs it and the suite runs on every
+build. A stock Debian, Ubuntu or Raspberry Pi OS kernel has it already.
+
+**What is still unverified:** every test, including the `gpio-sim` ones, runs
+against a *simulated* chip. This package has not yet driven a physical pin on
+real silicon — no measured press-to-event latency, no real debounce on a bouncy
+switch. Treat it as pre-release until that happens.
 
 ## Licence
 
